@@ -52,6 +52,7 @@ class HistorialOrdenSerializer(serializers.ModelSerializer):
 
 
 def exigir_orden_editable(orden):
+    orden.exigir_no_cancelada()
     if orden.estado not in ESTADOS_QUE_ADMITEN_LINEAS:
         raise serializers.ValidationError(
             f'La orden esta "{orden.estado}": desde "En proceso" lo adicional va en otra orden.'
@@ -217,6 +218,7 @@ class OrdenSerializer(serializers.ModelSerializer):
             "duracion_estimada_dias",
             "fecha_estimada_entrega",
             "fecha_entrega",
+            "motivo_cancelacion",
             "creado_en",
             "prendas",
             "detalle_prendas",
@@ -291,6 +293,7 @@ def asignar_operario(orden, operario, usuario):
     Desde "En proceso" la orden queda fija con su operario; solo el
     administrador la mueve, y solo si ese operario ya no esta activo.
     """
+    orden.exigir_no_cancelada()
     orden.exigir_abono()
     if orden.estado == Orden.Estado.EN_ESPERA:
         raise serializers.ValidationError(
@@ -508,6 +511,17 @@ class NovedadSerializer(serializers.ModelSerializer):
         if not hasattr(novedad, "foto"):
             return None
         return reverse("novedad-foto", args=[novedad.pk])
+
+
+class CancelacionSerializer(serializers.Serializer):
+    motivo = serializers.CharField(
+        max_length=255,
+        error_messages={
+            "required": "Indica el motivo de la cancelacion.",
+            "blank": "Indica el motivo de la cancelacion.",
+            "null": "Indica el motivo de la cancelacion.",
+        },
+    )
 
 
 class VerificacionPrendaSerializer(serializers.Serializer):
