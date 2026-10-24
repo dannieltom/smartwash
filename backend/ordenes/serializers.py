@@ -413,6 +413,52 @@ def registrar_novedades(orden, novedades, origen, usuario):
     )
 
 
+def registrar_decision(orden, decision, observacion, usuario):
+    """Aplica la decision del cliente a todas las novedades pendientes de la orden."""
+    novedades = list(orden.novedades.pendientes())
+    if orden.estado != Orden.Estado.CON_NOVEDAD or not novedades:
+        raise serializers.ValidationError(
+            {"estado": f'La orden esta "{orden.estado}" y no tiene una novedad pendiente.'}
+        )
+    if decision == Novedad.Decision.CONTINUAR:
+        orden.estado = novedades[0].estado_anterior
+    elif decision == Novedad.Decision.REPROCESAR:
+        # Sin costo para el cliente: solo se cuenta, como el reproceso de HU14.
+        orden.estado = Orden.Estado.EN_PROCESO
+        orden.numero_reprocesos += 1
+    ahora = timezone.now()
+    for novedad in novedades:
+        novedad.decision = decision
+        novedad.decision_observacion = observacion
+        novedad.decidida_por = usuario
+        novedad.decidida_en = ahora
+        novedad.registrar_autoria(usuario)
+        novedad.save()
+    orden.registrar_autoria(usuario)
+    orden.save()
+    registrar_evento(
+        orden,
+        Evento.DECISION_NOVEDAD,
+        usuario,
+        f"{Novedad.Decision(decision).label}: {observacion}. "
+        + (
+            f"{Orden.Estado.CON_NOVEDAD} → {orden.estado}"
+            if orden.estado != Orden.Estado.CON_NOVEDAD
+            else "La orden sigue Con novedad"
+        ),
+    )
+
+
+class DecisionNovedadSerializer(serializers.Serializer):
+    decision = serializers.ChoiceField(choices=Novedad.Decision.choices)
+    observacion = serializers.CharField(
+        error_messages={
+            "required": "La observacion es obligatoria: con quien se hablo y que decidio.",
+            "blank": "La observacion es obligatoria: con quien se hablo y que decidio.",
+        }
+    )
+
+
 class NovedadEntradaSerializer(serializers.Serializer):
     prenda = serializers.IntegerField()
     descripcion = serializers.CharField(
@@ -450,6 +496,8 @@ class NovedadSerializer(serializers.ModelSerializer):
             "usuario_nombre",
             "creado_en",
             "foto_url",
+            "decision",
+            "decision_observacion",
         )
         read_only_fields = fields
 
@@ -567,3 +615,17 @@ class OrdenAlertaSerializer(serializers.ModelSerializer):
 
     def get_dias(self, orden) -> int:
         return abs((orden.fecha_estimada_entrega - self.context["hoy"]).days)
+
+
+class OrdenConNovedadSerializer(serializers.ModelSerializer):
+    cliente_nombre = serializers.CharField(source="cliente.nombre_completo", read_only=True)
+    operario_nombre = serializers.SerializerMethodField()
+    novedades = NovedadSerializer(source="novedades_pendientes", many=True, read_only=True)
+
+    class Meta:
+        model = Orden
+        fields = ("id", "codigo", "cliente_nombre", "estado", "operario_nombre", "novedades")
+        read_only_fields = fields
+
+    def get_operario_nombre(self, orden) -> str | None:
+        return nombre_usuario(orden.operario) if orden.operario else None

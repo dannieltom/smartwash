@@ -2,7 +2,7 @@ import base64
 from datetime import timedelta
 
 from django.conf import settings
-from django.db.models import Sum
+from django.db.models import Prefetch, Sum
 from django.http import HttpResponse
 from django.shortcuts import get_object_or_404
 from django.utils import timezone
@@ -27,6 +27,7 @@ from .serializers import (
     AgregarServicioSerializer,
     AsignacionSerializer,
     CambioEstadoSerializer,
+    DecisionNovedadSerializer,
     EntregaSerializer,
     HistorialOrdenSerializer,
     NovedadEntradaSerializer,
@@ -34,6 +35,7 @@ from .serializers import (
     OperarioSerializer,
     OrdenAlertaSerializer,
     OrdenBandejaSerializer,
+    OrdenConNovedadSerializer,
     OrdenHistorialClienteSerializer,
     OrdenSerializer,
     PrendaEntradaSerializer,
@@ -43,6 +45,7 @@ from .serializers import (
     exigir_orden_editable,
     guardar_recalculo,
     operarios_activos,
+    registrar_decision,
     registrar_novedades,
 )
 
@@ -345,3 +348,35 @@ class FotoNovedadView(APIView):
         foto = get_object_or_404(FotoNovedad.objects.select_related("novedad__orden"), novedad=pk)
         exigir_acceso_a_la_orden(request.user, foto.novedad.orden)
         return HttpResponse(base64.b64decode(foto.contenido), content_type=foto.tipo)
+
+
+class OrdenesConNovedadView(generics.ListAPIView):
+    serializer_class = OrdenConNovedadSerializer
+    permission_classes = [AdministradorORecepcionista]
+
+    def get_queryset(self):
+        pendientes = Novedad.objects.pendientes().select_related(
+            "prenda__tipo_prenda", "prenda__material", "creado_por", "foto"
+        )
+        return (
+            Orden.objects.filter(estado=Orden.Estado.CON_NOVEDAD)
+            .select_related("cliente", "operario")
+            .prefetch_related(Prefetch("novedades", pendientes, to_attr="novedades_pendientes"))
+        )
+
+
+class DecisionNovedadView(APIView):
+    permission_classes = [AdministradorORecepcionista]
+
+    def post(self, request, pk):
+        entrada = DecisionNovedadSerializer(data=request.data)
+        entrada.is_valid(raise_exception=True)
+        with operacion_sobre_orden():
+            orden = get_object_or_404(Orden.objects.select_for_update(), pk=pk)
+            registrar_decision(
+                orden,
+                entrada.validated_data["decision"],
+                entrada.validated_data["observacion"],
+                request.user,
+            )
+        return Response(OrdenSerializer(ordenes_con_detalle().get(pk=orden.pk)).data)
