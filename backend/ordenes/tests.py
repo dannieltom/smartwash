@@ -2341,3 +2341,109 @@ class DecisionNovedadApiTests(OrdenEnProcesoMixin, APITestCase):
             (self.orden.estado, self.orden.numero_reprocesos), (Orden.Estado.CON_NOVEDAD, 0)
         )
         self.assertIsNone(Novedad.objects.get().decision)
+
+
+class ClasificacionPorConsumoTests(CatalogoDePruebaMixin, APITestCase):
+    def setUp(self):
+        self.crear_catalogo()
+        self.client.force_authenticate(self.recepcionista)
+        # Una prenda de planchado: 6000.
+        self.registrar(self.prenda(self.planchado))
+        self.orden = Orden.objects.get()
+        self.client.post(
+            f"/api/ordenes/{self.orden.pk}/pagos", {"monto": "6000", "metodo": "efectivo"}, format="json"
+        )
+        Orden.objects.filter(pk=self.orden.pk).update(estado=Orden.Estado.LISTA)
+
+    def ordenes_previas(self, estado, cantidad, valor="10000"):
+        for _ in range(cantidad):
+            orden = Orden.objects.create(cliente=self.cliente, recepcionista=self.recepcionista)
+            Orden.objects.filter(pk=orden.pk).update(estado=estado, valor_total=Decimal(valor))
+
+    def entregar(self, coincide=True, **extra):
+        prenda = {"prenda": self.orden.prendas.get().pk, "coincide": coincide, **extra}
+        return self.client.post(
+            f"/api/ordenes/{self.orden.pk}/entrega", {"prendas": [prenda]}, format="json"
+        )
+
+    def clasificacion(self):
+        self.cliente.refresh_from_db()
+        return self.cliente.clasificacion
+
+    def test_la_tercera_orden_cerrada_vuelve_frecuente_al_cliente_y_queda_en_el_historial(self):
+        self.ordenes_previas(Orden.Estado.ENTREGADA, 2)
+
+        response = self.entregar()
+
+        self.assertEqual(response.status_code, 200, response.json())
+        self.assertEqual(self.clasificacion(), Cliente.Clasificacion.FRECUENTE)
+        self.assertIn("Cliente: Ocasional → Frecuente", self.orden.historial.last().detalle)
+
+    def test_las_ordenes_canceladas_o_sin_cerrar_no_cuentan(self):
+        self.ordenes_previas(Orden.Estado.CANCELADA, 5, "200000")
+        self.ordenes_previas(Orden.Estado.EN_PROCESO, 5, "200000")
+
+        self.entregar()
+
+        self.assertEqual(self.clasificacion(), Cliente.Clasificacion.OCASIONAL)
+        self.assertNotIn("Cliente:", self.orden.historial.last().detalle)
+
+    def test_diez_ordenes_cerradas_hacen_vip(self):
+        self.ordenes_previas(Orden.Estado.ENTREGADA, 9, "1000")
+
+        self.entregar()
+
+        self.assertEqual(self.clasificacion(), Cliente.Clasificacion.VIP)
+
+    def test_500_mil_consumidos_hacen_vip_aunque_haya_pocas_ordenes(self):
+        self.ordenes_previas(Orden.Estado.ENTREGADA, 1, "494000")
+
+        self.entregar()
+
+        self.assertEqual(self.clasificacion(), Cliente.Clasificacion.VIP)
+        self.assertIn("Cliente: Ocasional → VIP", self.orden.historial.last().detalle)
+
+    def test_cuenta_el_valor_cobrado_con_descuento_y_no_el_subtotal(self):
+        self.ordenes_previas(Orden.Estado.ENTREGADA, 1, "493000")
+        Orden.objects.filter(valor_total=Decimal("493000")).update(
+            subtotal=Decimal("600000"), descuento=Decimal("107000")
+        )
+
+        self.entregar()
+
+        # Cobrado: 493000 + 6000 = 499000, mil por debajo del umbral VIP.
+        self.assertEqual(self.clasificacion(), Cliente.Clasificacion.OCASIONAL)
+
+    def test_la_clasificacion_nunca_baja(self):
+        Cliente.objects.filter(pk=self.cliente.pk).update(clasificacion=Cliente.Clasificacion.VIP)
+
+        self.entregar()
+
+        self.assertEqual(self.clasificacion(), Cliente.Clasificacion.VIP)
+
+    @override_settings(CLIENTE_FRECUENTE_MIN_ORDENES=1)
+    def test_los_umbrales_se_configuran_en_settings(self):
+        self.entregar()
+
+        self.assertEqual(self.clasificacion(), Cliente.Clasificacion.FRECUENTE)
+
+    def test_una_entrega_con_novedad_no_reclasifica(self):
+        self.ordenes_previas(Orden.Estado.ENTREGADA, 2)
+
+        self.entregar(coincide=False, observacion="Otro color")
+
+        self.assertEqual(self.clasificacion(), Cliente.Clasificacion.OCASIONAL)
+
+    def test_si_la_base_falla_no_se_entrega_ni_se_reclasifica(self):
+        self.ordenes_previas(Orden.Estado.ENTREGADA, 2)
+
+        with mock.patch(
+            "ordenes.views.registrar_evento", side_effect=OperationalError("sin conexion")
+        ), self.assertLogs("ordenes.historial", level="ERROR") as logs:
+            response = self.entregar()
+
+        self.assertEqual(response.status_code, 503)
+        self.assertIn("sin conexion", "\n".join(logs.output))
+        self.orden.refresh_from_db()
+        self.assertEqual(self.orden.estado, Orden.Estado.LISTA)
+        self.assertEqual(self.clasificacion(), Cliente.Clasificacion.OCASIONAL)

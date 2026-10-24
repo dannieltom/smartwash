@@ -4,7 +4,7 @@ from decimal import ROUND_CEILING, Decimal
 from django.conf import settings
 from django.core.exceptions import PermissionDenied, ValidationError
 from django.db import models
-from django.db.models import Sum
+from django.db.models import Count, Sum
 from django.utils import timezone
 from django.utils.crypto import get_random_string
 
@@ -235,6 +235,34 @@ class Orden(ModeloConAutoria):
             self.fecha_estimada_entrega = sumar_dias_habiles(
                 self.abono_alcanzado_en, self.duracion_estimada_dias
             )
+
+
+RANGO_CLASIFICACION = (
+    Cliente.Clasificacion.OCASIONAL,
+    Cliente.Clasificacion.FRECUENTE,
+    Cliente.Clasificacion.VIP,
+)
+
+
+def clasificacion_por_consumo(cliente):
+    """Clasifica por las ordenes cerradas del cliente; nunca baja de la que ya tiene.
+
+    Una orden solo llega a "Entregada" con el pago completo (HU24), asi que
+    entregada equivale a cerrada. valor_total es lo cobrado, con el descuento.
+    """
+    consumo = cliente.ordenes.filter(estado=Orden.Estado.ENTREGADA).aggregate(
+        ordenes=Count("id"), total=Sum("valor_total")
+    )
+    ordenes, total = consumo["ordenes"], consumo["total"] or Decimal("0")
+    if ordenes >= getattr(settings, "CLIENTE_VIP_MIN_ORDENES", 10) or total >= getattr(
+        settings, "CLIENTE_VIP_MIN_CONSUMO", Decimal("500000")
+    ):
+        calculada = Cliente.Clasificacion.VIP
+    elif ordenes >= getattr(settings, "CLIENTE_FRECUENTE_MIN_ORDENES", 3):
+        calculada = Cliente.Clasificacion.FRECUENTE
+    else:
+        calculada = Cliente.Clasificacion.OCASIONAL
+    return max(cliente.clasificacion, calculada, key=RANGO_CLASIFICACION.index)
 
 
 class Prenda(ModeloConAutoria):

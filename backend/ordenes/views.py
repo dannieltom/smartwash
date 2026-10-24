@@ -22,7 +22,14 @@ from core.permissions import (
 )
 
 from .historial import operacion_sobre_orden, registrar_evento
-from .models import FotoNovedad, HistorialOrden, Novedad, Orden, Prenda
+from .models import (
+    FotoNovedad,
+    HistorialOrden,
+    Novedad,
+    Orden,
+    Prenda,
+    clasificacion_por_consumo,
+)
 from .serializers import (
     AgregarServicioSerializer,
     AsignacionSerializer,
@@ -179,6 +186,17 @@ class AgregarServicioView(APIView):
         return respuesta_orden(orden)
 
 
+def reclasificar_cliente(cliente, usuario):
+    """Actualiza la clasificacion por consumo y devuelve la nota para el historial."""
+    anterior = cliente.clasificacion
+    cliente.clasificacion = clasificacion_por_consumo(cliente)
+    if cliente.clasificacion == anterior:
+        return ""
+    cliente.registrar_autoria(usuario)
+    cliente.save(update_fields=["clasificacion", "actualizado_por", "actualizado_en"])
+    return f". Cliente: {anterior} → {cliente.clasificacion}"
+
+
 class RegistrarEntregaView(APIView):
     permission_classes = [AdministradorORecepcionista]
 
@@ -205,7 +223,8 @@ class RegistrarEntregaView(APIView):
                     Evento.ENTREGA,
                     request.user,
                     f"Lista para entrega → Entregada. {orden.prendas.count()} prendas "
-                    "verificadas, todas coinciden con lo solicitado",
+                    "verificadas, todas coinciden con lo solicitado"
+                    + reclasificar_cliente(orden.cliente, request.user),
                 )
         return Response(OrdenSerializer(ordenes_con_detalle().get(pk=orden.pk)).data)
 
