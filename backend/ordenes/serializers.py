@@ -423,3 +423,31 @@ class OrdenHistorialClienteSerializer(serializers.ModelSerializer):
         model = Orden
         fields = ("id", "codigo", "creado_en", "estado", "valor_total", "estado_pago")
         read_only_fields = fields
+
+
+class OrdenAlertaSerializer(serializers.ModelSerializer):
+    """`dias` es el retraso si la orden esta retrasada y lo que falta si esta proxima (0 = vence hoy)."""
+
+    cliente_nombre = serializers.CharField(source="cliente.nombre_completo", read_only=True)
+    tipo = serializers.SerializerMethodField()
+    dias = serializers.SerializerMethodField()
+
+    class Meta:
+        model = Orden
+        fields = (
+            "id",
+            "codigo",
+            "cliente_nombre",
+            "estado",
+            "operario",
+            "fecha_estimada_entrega",
+            "tipo",
+            "dias",
+        )
+        read_only_fields = fields
+
+    def get_tipo(self, orden) -> str:
+        return "retrasada" if orden.fecha_estimada_entrega < self.context["hoy"] else "proxima"
+
+    def get_dias(self, orden) -> int:
+        return abs((orden.fecha_estimada_entrega - self.context["hoy"]).days)

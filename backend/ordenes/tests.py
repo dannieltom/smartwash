@@ -1829,3 +1829,88 @@ class HistorialClienteApiTests(APITestCase):
         for metodo in ("post", "put", "patch", "delete"):
             response = getattr(self.client, metodo)(self.url, {}, format="json")
             self.assertEqual(response.status_code, 405, metodo)
+
+
+# 2026-05-10 03:00 UTC sigue siendo el 9 de mayo (22:00) en Bogota.
+AHORA = datetime(2026, 5, 10, 3, 0, tzinfo=dt_timezone.utc)
+
+
+@mock.patch("django.utils.timezone.now", return_value=AHORA)
+class AlertasVencimientoApiTests(APITestCase):
+    url = "/api/ordenes/alertas"
+
+    def setUp(self):
+        self.admin = User.objects.create_user(
+            username="admin", password="x", rol=User.Rol.ADMINISTRADOR
+        )
+        self.operario = User.objects.create_user(
+            username="op", password="x", rol=User.Rol.OPERARIO
+        )
+
+    def orden(self, codigo, estado, fecha, operario=None):
+        orden = crear_orden(codigo=codigo)
+        Orden.objects.filter(pk=orden.pk).update(
+            estado=estado, fecha_estimada_entrega=fecha, operario=operario
+        )
+        return orden
+
+    def alertas(self, usuario):
+        self.client.force_login(usuario)
+        response = self.client.get(self.url)
+        self.assertEqual(response.status_code, 200)
+        return [(a["codigo"], a["tipo"], a["dias"]) for a in response.json()]
+
+    def test_prioriza_las_mas_retrasadas_y_luego_las_mas_proximas(self, _now):
+        self.orden("SW-PROX2", Orden.Estado.CLASIFICADA, date(2026, 5, 11))
+        self.orden("SW-RETR1", Orden.Estado.EN_PROCESO, date(2026, 5, 8))
+        self.orden("SW-HOY", Orden.Estado.LISTA, date(2026, 5, 9))
+        self.orden("SW-RETR3", Orden.Estado.RECIBIDA, date(2026, 5, 6))
+        self.orden("SW-LEJOS", Orden.Estado.CONTROL_CALIDAD, date(2026, 5, 12))
+
+        self.assertEqual(
+            self.alertas(self.admin),
+            [
+                ("SW-RETR3", "retrasada", 3),
+                ("SW-RETR1", "retrasada", 1),
+                ("SW-HOY", "proxima", 0),
+                ("SW-PROX2", "proxima", 2),
+            ],
+        )
+
+    def test_hoy_es_la_fecha_de_bogota_y_no_la_de_utc(self, _now):
+        self.orden("SW-HOY", Orden.Estado.EN_PROCESO, date(2026, 5, 9))
+
+        self.assertEqual(self.alertas(self.admin), [("SW-HOY", "proxima", 0)])
+
+    def test_excluye_en_espera_canceladas_y_entregadas(self, _now):
+        vencida = date(2026, 5, 1)
+        crear_orden(codigo="SW-ESPERA")
+        self.orden("SW-CANCEL", Orden.Estado.CANCELADA, vencida)
+        self.orden("SW-ENTREG", Orden.Estado.ENTREGADA, vencida)
+
+        self.assertEqual(self.alertas(self.admin), [])
+
+    def test_la_recepcionista_ve_todas_y_el_operario_solo_las_suyas(self, _now):
+        self.orden("SW-MIA", Orden.Estado.EN_PROCESO, date(2026, 5, 8), self.operario)
+        self.orden("SW-OTRA", Orden.Estado.EN_PROCESO, date(2026, 5, 8))
+
+        recepcionista = User.objects.get(username="recepcion")
+        self.assertEqual(len(self.alertas(recepcionista)), 2)
+        self.assertEqual(self.alertas(self.operario), [("SW-MIA", "retrasada", 1)])
+
+    def test_si_la_base_falla_responde_500_registra_el_error_y_no_modifica_nada(self, _now):
+        self.orden("SW-RETR", Orden.Estado.EN_PROCESO, date(2026, 5, 8))
+        antes = list(Orden.objects.values_list("codigo", "estado", "fecha_estimada_entrega"))
+        self.client.force_login(self.admin)
+        self.client.raise_request_exception = False
+
+        with mock.patch.object(
+            Orden.objects, "filter", side_effect=OperationalError("sin conexion")
+        ), self.assertLogs("django.request", level="ERROR") as logs:
+            response = self.client.get(self.url)
+
+        self.assertEqual(response.status_code, 500)
+        self.assertIn("sin conexion", "\n".join(logs.output))
+        self.assertEqual(
+            list(Orden.objects.values_list("codigo", "estado", "fecha_estimada_entrega")), antes
+        )
