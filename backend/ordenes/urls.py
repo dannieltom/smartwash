@@ -7,8 +7,10 @@ from .views import (
     AsignarOperarioView,
     BandejaOperarioView,
     CambiarEstadoView,
+    FotoNovedadView,
     HistorialClienteView,
     HistorialOrdenView,
+    NovedadesOrdenView,
     OperariosActivosView,
     OrdenDetailView,
     OrdenListCreateView,
@@ -33,5 +35,7 @@ urlpatterns = [
     path("ordenes/<int:pk>/estado", CambiarEstadoView.as_view(), name="orden-estado"),
     path("ordenes/<int:pk>/historial", HistorialOrdenView.as_view(), name="orden-historial"),
     path("clientes/<int:pk>/ordenes", HistorialClienteView.as_view(), name="cliente-ordenes"),
+    path("ordenes/<int:pk>/novedades", NovedadesOrdenView.as_view(), name="orden-novedades"),
+    path("novedades/<int:pk>/foto", FotoNovedadView.as_view(), name="novedad-foto"),
     path("operarios", OperariosActivosView.as_view(), name="operarios-activos"),
 ]

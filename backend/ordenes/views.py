@@ -1,7 +1,9 @@
+import base64
 from datetime import timedelta
 
 from django.conf import settings
 from django.db.models import Sum
+from django.http import HttpResponse
 from django.shortcuts import get_object_or_404
 from django.utils import timezone
 from rest_framework import generics, serializers, status
@@ -20,13 +22,15 @@ from core.permissions import (
 )
 
 from .historial import operacion_sobre_orden, registrar_evento
-from .models import HistorialOrden, Orden, Prenda
+from .models import FotoNovedad, HistorialOrden, Novedad, Orden, Prenda
 from .serializers import (
     AgregarServicioSerializer,
     AsignacionSerializer,
     CambioEstadoSerializer,
     EntregaSerializer,
     HistorialOrdenSerializer,
+    NovedadEntradaSerializer,
+    NovedadSerializer,
     OperarioSerializer,
     OrdenAlertaSerializer,
     OrdenBandejaSerializer,
@@ -39,6 +43,7 @@ from .serializers import (
     exigir_orden_editable,
     guardar_recalculo,
     operarios_activos,
+    registrar_novedades,
 )
 
 Evento = HistorialOrden.TipoEvento
@@ -70,6 +75,7 @@ class AlertasVencimientoView(generics.ListAPIView):
         Orden.Estado.EN_PROCESO,
         Orden.Estado.CONTROL_CALIDAD,
         Orden.Estado.LISTA,
+        Orden.Estado.CON_NOVEDAD,
     )
 
     def get_serializer_context(self):
@@ -182,15 +188,22 @@ class RegistrarEntregaView(APIView):
                 raise serializers.ValidationError(
                     {"estado": f'La orden esta "{orden.estado}"; solo se entrega desde "Lista para entrega".'}
                 )
-            detalle = entrada.verificar_contra(orden)
-            # save() exige el pago completo (HU24) e indica el saldo si falta.
-            orden.estado = Orden.Estado.ENTREGADA
-            orden.fecha_entrega = timezone.now()
-            orden.registrar_autoria(request.user)
-            orden.save()
-            registrar_evento(
-                orden, Evento.ENTREGA, request.user, f"Lista para entrega → Entregada. {detalle}"
-            )
+            no_coinciden = entrada.verificar_contra(orden)
+            if no_coinciden:
+                registrar_novedades(orden, no_coinciden, Novedad.Origen.ENTREGA, request.user)
+            else:
+                # save() exige el pago completo (HU24) e indica el saldo si falta.
+                orden.estado = Orden.Estado.ENTREGADA
+                orden.fecha_entrega = timezone.now()
+                orden.registrar_autoria(request.user)
+                orden.save()
+                registrar_evento(
+                    orden,
+                    Evento.ENTREGA,
+                    request.user,
+                    f"Lista para entrega → Entregada. {orden.prendas.count()} prendas "
+                    "verificadas, todas coinciden con lo solicitado",
+                )
         return Response(OrdenSerializer(ordenes_con_detalle().get(pk=orden.pk)).data)
 
 
@@ -278,3 +291,57 @@ class HistorialClienteView(APIView):
                 "ordenes": OrdenHistorialClienteSerializer(ordenes, many=True).data,
             }
         )
+
+
+def exigir_acceso_a_la_orden(usuario, orden):
+    if usuario.rol == User.Rol.OPERARIO and orden.operario_id != usuario.pk:
+        raise PermissionDenied("La orden no esta asignada a este operario.")
+
+
+class NovedadesOrdenView(APIView):
+    ESTADOS_CON_PROCESO = (Orden.Estado.EN_PROCESO, Orden.Estado.CONTROL_CALIDAD)
+
+    def get(self, request, pk):
+        orden = get_object_or_404(Orden, pk=pk)
+        exigir_acceso_a_la_orden(request.user, orden)
+        novedades = orden.novedades.select_related(
+            "prenda__tipo_prenda", "prenda__material", "creado_por", "foto"
+        )
+        return Response(NovedadSerializer(novedades, many=True).data)
+
+    def post(self, request, pk):
+        if request.user.rol == User.Rol.RECEPCIONISTA:
+            raise PermissionDenied(
+                "Durante el proceso registran la novedad el operario asignado o el administrador."
+            )
+        exigir_acceso_a_la_orden(request.user, get_object_or_404(Orden, pk=pk))
+        entrada = NovedadEntradaSerializer(data=request.data)
+        entrada.is_valid(raise_exception=True)
+        datos = entrada.validated_data
+        with operacion_sobre_orden():
+            orden = get_object_or_404(Orden.objects.select_for_update(), pk=pk)
+            if orden.estado not in self.ESTADOS_CON_PROCESO:
+                raise serializers.ValidationError(
+                    {
+                        "estado": f'La orden esta "{orden.estado}"; la novedad se registra '
+                        'con la orden "En proceso" o "Control de calidad".'
+                    }
+                )
+            prenda = orden.prendas.filter(pk=datos["prenda"]).first()
+            if prenda is None:
+                raise serializers.ValidationError({"prenda": "La prenda no pertenece a la orden."})
+            registrar_novedades(
+                orden,
+                [(prenda, datos["descripcion"], datos["foto"])],
+                Novedad.Origen.PROCESO,
+                request.user,
+            )
+        novedad = orden.novedades.select_related("creado_por", "foto").last()
+        return Response(NovedadSerializer(novedad).data, status=status.HTTP_201_CREATED)
+
+
+class FotoNovedadView(APIView):
+    def get(self, request, pk):
+        foto = get_object_or_404(FotoNovedad.objects.select_related("novedad__orden"), novedad=pk)
+        exigir_acceso_a_la_orden(request.user, foto.novedad.orden)
+        return HttpResponse(base64.b64decode(foto.contenido), content_type=foto.tipo)

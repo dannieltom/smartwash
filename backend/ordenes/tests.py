@@ -1,3 +1,4 @@
+import base64
 from datetime import date, datetime
 from datetime import timezone as dt_timezone
 from decimal import Decimal
@@ -18,7 +19,9 @@ from fidelizacion.models import ReglaDescuento
 
 from .historial import OperacionNoCompletada, operacion_sobre_orden, registrar_evento
 from .models import (
+    FotoNovedad,
     HistorialOrden,
+    Novedad,
     Orden,
     OrdenServicio,
     Prenda,
@@ -881,7 +884,7 @@ class RegistrarEntregaApiTests(CatalogoDePruebaMixin, APITestCase):
         self.assertEqual(evento.usuario, self.recepcionista)
         self.assertIn("2 prendas verificadas, todas coinciden", evento.detalle)
 
-    def test_una_discrepancia_exige_observacion_y_queda_en_el_historial(self):
+    def test_una_prenda_que_no_coincide_exige_observacion_y_deja_la_orden_con_novedad(self):
         self.lista_y_pagada()
         sin_observacion = self.entregar(
             {"prenda": self.camisa_1.pk, "coincide": True},
@@ -897,7 +900,11 @@ class RegistrarEntregaApiTests(CatalogoDePruebaMixin, APITestCase):
         )
 
         self.assertEqual(response.status_code, 200)
-        self.assertIn("Mancha en el cuello", self.orden.historial.last().detalle)
+        self.orden.refresh_from_db()
+        self.assertEqual(self.orden.estado, Orden.Estado.CON_NOVEDAD)
+        evento = self.orden.historial.last()
+        self.assertEqual(evento.tipo_evento, Evento.NOVEDAD)
+        self.assertIn("Mancha en el cuello (sin foto)", evento.detalle)
 
     def test_con_pago_incompleto_no_se_entrega_e_indica_el_saldo(self):
         self.lista_y_pagada(monto="10000")
@@ -1890,6 +1897,11 @@ class AlertasVencimientoApiTests(APITestCase):
 
         self.assertEqual(self.alertas(self.admin), [])
 
+    def test_una_orden_con_novedad_sigue_alertando(self, _now):
+        self.orden("SW-NOVEDAD", Orden.Estado.CON_NOVEDAD, date(2026, 5, 8))
+
+        self.assertEqual(self.alertas(self.admin), [("SW-NOVEDAD", "retrasada", 1)])
+
     def test_la_recepcionista_ve_todas_y_el_operario_solo_las_suyas(self, _now):
         self.orden("SW-MIA", Orden.Estado.EN_PROCESO, date(2026, 5, 8), self.operario)
         self.orden("SW-OTRA", Orden.Estado.EN_PROCESO, date(2026, 5, 8))
@@ -1914,3 +1926,244 @@ class AlertasVencimientoApiTests(APITestCase):
         self.assertEqual(
             list(Orden.objects.values_list("codigo", "estado", "fecha_estimada_entrega")), antes
         )
+
+
+def data_url(datos, tipo="image/jpeg"):
+    return f"data:{tipo};base64,{base64.b64encode(datos).decode()}"
+
+
+JPEG = b"\xff\xd8\xff\xe0" + b"0" * 100
+PNG = b"\x89PNG\r\n\x1a\n" + b"0" * 100
+
+
+class NovedadApiTests(CatalogoDePruebaMixin, APITestCase):
+    def setUp(self):
+        self.crear_catalogo()
+        self.admin = User.objects.create_user(
+            username="admin", password="x", rol=User.Rol.ADMINISTRADOR
+        )
+        self.operario = User.objects.create_user(
+            username="op", password="x", rol=User.Rol.OPERARIO
+        )
+        self.otro_operario = User.objects.create_user(
+            username="op2", password="x", rol=User.Rol.OPERARIO
+        )
+        self.client.force_authenticate(self.recepcionista)
+        self.registrar(self.prenda(self.planchado), self.prenda(self.planchado))
+        self.orden = Orden.objects.get()
+        self.camisa_1, self.camisa_2 = self.orden.prendas.all()
+        Orden.objects.filter(pk=self.orden.pk).update(
+            estado=Orden.Estado.EN_PROCESO, operario=self.operario, abono_alcanzado_en=date(2026, 5, 1)
+        )
+        self.url = f"/api/ordenes/{self.orden.pk}/novedades"
+
+    def registrar_novedad(self, usuario=None, **datos):
+        self.client.force_authenticate(usuario or self.operario)
+        cuerpo = {"prenda": self.camisa_1.pk, "descripcion": "Mancha de tinta", "foto": data_url(JPEG)}
+        cuerpo.update(datos)
+        return self.client.post(self.url, {k: v for k, v in cuerpo.items() if v is not ...}, format="json")
+
+    def assertSinCambios(self, estado=Orden.Estado.EN_PROCESO):
+        self.orden.refresh_from_db()
+        self.assertEqual(self.orden.estado, estado)
+        self.assertFalse(Novedad.objects.exists())
+        self.assertFalse(FotoNovedad.objects.exists())
+        self.assertFalse(self.orden.historial.filter(tipo_evento=Evento.NOVEDAD).exists())
+
+    def test_el_operario_registra_la_novedad_con_foto_y_la_orden_queda_con_novedad(self):
+        response = self.registrar_novedad()
+
+        self.assertEqual(response.status_code, 201, response.json())
+        self.orden.refresh_from_db()
+        self.assertEqual(self.orden.estado, Orden.Estado.CON_NOVEDAD)
+        novedad = Novedad.objects.get()
+        self.assertEqual(
+            (novedad.prenda, novedad.descripcion, novedad.origen, novedad.estado_anterior),
+            (self.camisa_1, "Mancha de tinta", Novedad.Origen.PROCESO, Orden.Estado.EN_PROCESO),
+        )
+        self.assertEqual((novedad.foto.tipo, novedad.foto.tamano), ("image/jpeg", len(JPEG)))
+        self.assertEqual(response.json()["foto_url"], f"/api/novedades/{novedad.pk}/foto")
+        evento = self.orden.historial.last()
+        self.assertEqual((evento.tipo_evento, evento.usuario), (Evento.NOVEDAD, self.operario))
+        self.assertIn(str(self.camisa_1), evento.detalle)
+        self.assertIn("Mancha de tinta (con foto)", evento.detalle)
+
+    def test_el_administrador_registra_desde_control_de_calidad_con_base64_sin_prefijo(self):
+        Orden.objects.filter(pk=self.orden.pk).update(estado=Orden.Estado.CONTROL_CALIDAD)
+
+        response = self.registrar_novedad(self.admin, foto=base64.b64encode(PNG).decode())
+
+        self.assertEqual(response.status_code, 201, response.json())
+        self.assertEqual(Novedad.objects.get().foto.tipo, "image/png")
+
+    def test_sin_foto_durante_el_proceso_se_rechaza(self):
+        for foto in (..., "", None):
+            with self.subTest(foto=foto):
+                response = self.registrar_novedad(foto=foto)
+                self.assertEqual(response.status_code, 400)
+                self.assertIn("La fotografia es obligatoria.", response.json()["foto"])
+        self.assertSinCambios()
+
+    def test_sin_descripcion_se_rechaza(self):
+        response = self.registrar_novedad(descripcion="   ")
+
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("La descripcion es obligatoria.", response.json()["descripcion"])
+        self.assertSinCambios()
+
+    def test_un_archivo_que_no_es_imagen_o_supera_500_kb_se_rechaza(self):
+        casos = {
+            data_url(b"%PDF-1.4 no soy imagen", "image/jpeg"): "no es una imagen",
+            "esto no es base64!": "base64",
+            data_url(b"\xff\xd8\xff" + b"0" * (500 * 1024)): "maximo es 500 KB",
+        }
+        for foto, motivo in casos.items():
+            with self.subTest(motivo=motivo):
+                response = self.registrar_novedad(foto=foto)
+                self.assertEqual(response.status_code, 400)
+                self.assertIn(motivo, response.json()["foto"][0])
+        self.assertSinCambios()
+
+    def test_una_foto_de_500_kb_exactos_se_acepta(self):
+        foto = data_url(b"\xff\xd8\xff" + b"0" * (500 * 1024 - 3))
+
+        self.assertEqual(self.registrar_novedad(foto=foto).status_code, 201)
+
+    def test_el_operario_no_asignado_y_la_recepcionista_no_pueden_registrarla(self):
+        for usuario in (self.otro_operario, self.recepcionista):
+            with self.subTest(usuario=usuario.username):
+                self.assertEqual(self.registrar_novedad(usuario).status_code, 403)
+        self.assertSinCambios()
+
+    def test_solo_se_registra_en_proceso_o_control_de_calidad(self):
+        for estado in (Orden.Estado.CLASIFICADA, Orden.Estado.LISTA, Orden.Estado.CON_NOVEDAD):
+            Orden.objects.filter(pk=self.orden.pk).update(estado=estado)
+            with self.subTest(estado=estado):
+                self.assertEqual(self.registrar_novedad().status_code, 400)
+        self.assertFalse(Novedad.objects.exists())
+
+    def test_una_prenda_de_otra_orden_se_rechaza(self):
+        response = self.registrar_novedad(prenda=999)
+
+        self.assertEqual(response.status_code, 400)
+        self.assertSinCambios()
+
+    def test_una_orden_con_novedad_no_avanza_de_estado(self):
+        self.registrar_novedad()
+
+        for usuario in (self.operario, self.admin):
+            self.client.force_authenticate(usuario)
+            response = self.client.post(
+                f"/api/ordenes/{self.orden.pk}/estado",
+                {"estado": Orden.Estado.CONTROL_CALIDAD},
+                format="json",
+            )
+            self.assertEqual(response.status_code, 400)
+            self.assertIn("novedad pendiente", str(response.json()))
+        self.orden.refresh_from_db()
+        self.assertEqual(self.orden.estado, Orden.Estado.CON_NOVEDAD)
+
+    def test_una_orden_con_novedad_no_se_entrega_ni_se_reasigna(self):
+        self.registrar_novedad()
+        self.client.force_authenticate(self.admin)
+
+        entrega = self.client.post(
+            f"/api/ordenes/{self.orden.pk}/entrega",
+            {"prendas": [{"prenda": p.pk, "coincide": True} for p in (self.camisa_1, self.camisa_2)]},
+            format="json",
+        )
+        asignacion = self.client.post(
+            f"/api/ordenes/{self.orden.pk}/asignacion",
+            {"operario": self.otro_operario.pk},
+            format="json",
+        )
+
+        self.assertEqual((entrega.status_code, asignacion.status_code), (400, 400))
+        self.orden.refresh_from_db()
+        self.assertEqual(
+            (self.orden.estado, self.orden.operario), (Orden.Estado.CON_NOVEDAD, self.operario)
+        )
+
+    def test_si_la_base_falla_no_queda_novedad_ni_foto_ni_cambio_de_estado(self):
+        with mock.patch(
+            "ordenes.serializers.registrar_evento", side_effect=OperationalError("sin conexion")
+        ), self.assertLogs("ordenes.historial", level="ERROR") as logs:
+            response = self.registrar_novedad()
+
+        self.assertEqual(response.status_code, 503)
+        self.assertIn("sin conexion", "\n".join(logs.output))
+        self.assertSinCambios()
+
+    def test_la_foto_la_ven_el_administrador_la_recepcionista_y_el_operario_asignado(self):
+        self.registrar_novedad()
+        url = f"/api/novedades/{Novedad.objects.get().pk}/foto"
+
+        for usuario in (self.admin, self.recepcionista, self.operario):
+            with self.subTest(usuario=usuario.username):
+                self.client.force_authenticate(usuario)
+                response = self.client.get(url)
+                self.assertEqual(response.status_code, 200)
+                self.assertEqual(response["Content-Type"], "image/jpeg")
+                self.assertEqual(response.content, JPEG)
+
+        self.client.force_authenticate(self.otro_operario)
+        self.assertEqual(self.client.get(url).status_code, 403)
+        self.client.force_authenticate(None)
+        self.assertEqual(self.client.get(url).status_code, 403)
+
+    def test_el_listado_de_novedades_no_incluye_el_contenido_de_la_foto(self):
+        self.registrar_novedad()
+        self.client.force_authenticate(self.recepcionista)
+
+        novedades = self.client.get(self.url).json()
+
+        self.assertEqual(len(novedades), 1)
+        self.assertNotIn("contenido", novedades[0])
+        self.assertEqual(novedades[0]["usuario_nombre"], "op")
+        self.client.force_authenticate(self.otro_operario)
+        self.assertEqual(self.client.get(self.url).status_code, 403)
+
+    def test_en_la_entrega_cada_prenda_que_no_coincide_es_una_novedad_y_hay_un_solo_evento(self):
+        self.client.post(
+            f"/api/ordenes/{self.orden.pk}/pagos",
+            {"monto": "12000", "metodo": "efectivo"},
+            format="json",
+        )
+        Orden.objects.filter(pk=self.orden.pk).update(estado=Orden.Estado.LISTA)
+        eventos_antes = self.orden.historial.count()
+        self.client.force_authenticate(self.recepcionista)
+
+        response = self.client.post(
+            f"/api/ordenes/{self.orden.pk}/entrega",
+            {
+                "prendas": [
+                    {"prenda": self.camisa_1.pk, "coincide": False, "observacion": "Falta un boton"},
+                    {
+                        "prenda": self.camisa_2.pk,
+                        "coincide": False,
+                        "observacion": "Otro color",
+                        "foto": data_url(JPEG),
+                    },
+                ]
+            },
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, 200, response.json())
+        self.orden.refresh_from_db()
+        self.assertEqual(self.orden.estado, Orden.Estado.CON_NOVEDAD)
+        self.assertIsNone(self.orden.fecha_entrega)
+        novedades = list(Novedad.objects.order_by("id"))
+        self.assertEqual(
+            [(n.prenda, n.origen, n.estado_anterior, hasattr(n, "foto")) for n in novedades],
+            [
+                (self.camisa_1, Novedad.Origen.ENTREGA, Orden.Estado.LISTA, False),
+                (self.camisa_2, Novedad.Origen.ENTREGA, Orden.Estado.LISTA, True),
+            ],
+        )
+        self.assertEqual(self.orden.historial.count(), eventos_antes + 1)
+        evento = self.orden.historial.last()
+        self.assertEqual((evento.tipo_evento, evento.usuario), (Evento.NOVEDAD, self.recepcionista))
+        self.assertIn("detectada en la entrega", evento.detalle)
+        self.assertIn("Falta un boton (sin foto)", evento.detalle)
+        self.assertIn("Otro color (con foto)", evento.detalle)
