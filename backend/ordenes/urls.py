@@ -1,6 +1,7 @@
 from django.urls import path
 
 from .views import (
+    AlertasVencimientoView,
     AgregarPrendaView,
     AgregarServicioView,
     AsignarOperarioView,
@@ -16,6 +17,7 @@ from .views import (
 
 urlpatterns = [
     path("ordenes", OrdenListCreateView.as_view(), name="ordenes"),
+    path("ordenes/alertas", AlertasVencimientoView.as_view(), name="ordenes-alertas"),
     path("ordenes/bandeja", BandejaOperarioView.as_view(), name="ordenes-bandeja"),
     path("ordenes/<int:pk>", OrdenDetailView.as_view(), name="orden-detalle"),
     path("ordenes/<int:pk>/prendas", AgregarPrendaView.as_view(), name="orden-prendas"),

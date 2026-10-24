@@ -1,3 +1,6 @@
+from datetime import timedelta
+
+from django.conf import settings
 from django.db.models import Sum
 from django.shortcuts import get_object_or_404
 from django.utils import timezone
@@ -25,6 +28,7 @@ from .serializers import (
     EntregaSerializer,
     HistorialOrdenSerializer,
     OperarioSerializer,
+    OrdenAlertaSerializer,
     OrdenBandejaSerializer,
     OrdenHistorialClienteSerializer,
     OrdenSerializer,
@@ -55,6 +59,35 @@ class OrdenListCreateView(generics.ListCreateAPIView):
         if self.request.user.rol == User.Rol.OPERARIO:
             return ordenes.filter(operario=self.request.user)
         return ordenes
+
+
+class AlertasVencimientoView(generics.ListAPIView):
+    serializer_class = OrdenAlertaSerializer
+    # Antes de "Recibida" no hay fecha estimada; despues de "Lista" ya no hay que alertar.
+    ESTADOS_CON_ALERTA = (
+        Orden.Estado.RECIBIDA,
+        Orden.Estado.CLASIFICADA,
+        Orden.Estado.EN_PROCESO,
+        Orden.Estado.CONTROL_CALIDAD,
+        Orden.Estado.LISTA,
+    )
+
+    def get_serializer_context(self):
+        return {**super().get_serializer_context(), "hoy": self.hoy}
+
+    def get_queryset(self):
+        # localdate usa TIME_ZONE (America/Bogota): "hoy" es el de la lavanderia, no el de UTC.
+        self.hoy = timezone.localdate()
+        limite = self.hoy + timedelta(days=getattr(settings, "ORDEN_DIAS_ALERTA", 2))
+        ordenes = Orden.objects.filter(
+            estado__in=self.ESTADOS_CON_ALERTA,
+            fecha_estimada_entrega__isnull=False,
+            fecha_estimada_entrega__lte=limite,
+        )
+        if self.request.user.rol == User.Rol.OPERARIO:
+            ordenes = ordenes.filter(operario=self.request.user)
+        # La fecha mas antigua primero: las mas retrasadas encabezan la lista.
+        return ordenes.select_related("cliente").order_by("fecha_estimada_entrega", "creado_en")
 
 
 class OrdenDetailView(generics.RetrieveAPIView):
