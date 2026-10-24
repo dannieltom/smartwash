@@ -5,6 +5,7 @@ from decimal import Decimal
 from unittest import mock
 
 from django.contrib.auth import get_user_model
+from django.core import mail
 from django.core.exceptions import PermissionDenied
 from django.core.exceptions import ValidationError as DjangoValidationError
 from django.db import IntegrityError, OperationalError, transaction
@@ -2447,3 +2448,120 @@ class ClasificacionPorConsumoTests(CatalogoDePruebaMixin, APITestCase):
         self.orden.refresh_from_db()
         self.assertEqual(self.orden.estado, Orden.Estado.LISTA)
         self.assertEqual(self.clasificacion(), Cliente.Clasificacion.OCASIONAL)
+
+
+class AvisoOrdenListaTests(OrdenEnProcesoMixin, APITestCase):
+    def setUp(self):
+        super().setUp()
+        Cliente.objects.filter(pk=self.cliente.pk).update(correo="ana@example.com")
+        Orden.objects.filter(pk=self.orden.pk).update(estado=Orden.Estado.CONTROL_CALIDAD)
+
+    def cambiar_estado(self, estado):
+        self.client.force_authenticate(self.operario)
+        with self.captureOnCommitCallbacks(execute=True):
+            return self.client.post(
+                f"/api/ordenes/{self.orden.pk}/estado", {"estado": estado}, format="json"
+            )
+
+    def pagar(self, monto):
+        self.client.force_authenticate(self.recepcionista)
+        self.client.post(
+            f"/api/ordenes/{self.orden.pk}/pagos", {"monto": monto, "metodo": "efectivo"}, format="json"
+        )
+
+    def ultimo_aviso(self):
+        return self.orden.historial.filter(tipo_evento=Evento.NOTIFICACION).last()
+
+    def test_al_quedar_lista_se_avisa_al_cliente_con_el_saldo_pendiente(self):
+        self.pagar("2000")
+
+        response = self.cambiar_estado(Orden.Estado.LISTA)
+
+        self.assertEqual(response.status_code, 200, response.json())
+        self.assertEqual(len(mail.outbox), 1)
+        aviso = mail.outbox[0]
+        self.assertEqual(aviso.to, ["ana@example.com"])
+        self.assertIn(self.orden.codigo, aviso.subject)
+        self.assertIn("esta lista para recoger", aviso.body)
+        self.assertIn("Saldo pendiente por pagar al recogerla: $10.000.", aviso.body)
+        evento = self.ultimo_aviso()
+        self.assertIsNone(evento.usuario)
+        self.assertEqual(evento.detalle, "Aviso de orden lista enviado a ana@example.com.")
+
+    def test_si_esta_pagada_el_aviso_no_menciona_saldo(self):
+        self.pagar("12000")
+
+        self.cambiar_estado(Orden.Estado.LISTA)
+
+        self.assertEqual(len(mail.outbox), 1)
+        self.assertNotIn("Saldo", mail.outbox[0].body)
+
+    def test_si_la_base_falla_no_cambia_el_estado_ni_se_avisa(self):
+        with mock.patch(
+            "ordenes.views.registrar_evento", side_effect=OperationalError("sin conexion")
+        ), self.assertLogs("ordenes.historial", level="ERROR"):
+            response = self.cambiar_estado(Orden.Estado.LISTA)
+
+        self.assertEqual(response.status_code, 503)
+        self.orden.refresh_from_db()
+        self.assertEqual(self.orden.estado, Orden.Estado.CONTROL_CALIDAD)
+        self.assertEqual(mail.outbox, [])
+        self.assertIsNone(self.ultimo_aviso())
+
+    def test_si_falla_el_correo_la_orden_sigue_lista_y_queda_constancia(self):
+        with mock.patch(
+            "ordenes.avisos.send_mail", side_effect=RuntimeError("Resend caido")
+        ), self.assertLogs("ordenes.avisos", level="ERROR") as logs:
+            response = self.cambiar_estado(Orden.Estado.LISTA)
+
+        self.assertEqual(response.status_code, 200)
+        self.orden.refresh_from_db()
+        self.assertEqual(self.orden.estado, Orden.Estado.LISTA)
+        self.assertIn("Resend caido", "\n".join(logs.output))
+        self.assertIn("No se pudo enviar el aviso", self.ultimo_aviso().detalle)
+
+    def test_sin_correo_no_se_envia_y_queda_la_indicacion_de_llamar(self):
+        Cliente.objects.filter(pk=self.cliente.pk).update(correo="")
+
+        self.cambiar_estado(Orden.Estado.LISTA)
+
+        self.assertEqual(mail.outbox, [])
+        self.assertIn("no tiene correo registrado", self.ultimo_aviso().detalle)
+
+    def test_otros_cambios_de_estado_no_avisan(self):
+        self.cambiar_estado(Orden.Estado.EN_PROCESO)
+
+        self.assertEqual(mail.outbox, [])
+        self.assertIsNone(self.ultimo_aviso())
+
+    def test_continuar_tras_una_novedad_de_la_entrega_no_vuelve_a_avisar(self):
+        self.pagar("12000")
+        Orden.objects.filter(pk=self.orden.pk).update(estado=Orden.Estado.LISTA)
+        with self.captureOnCommitCallbacks(execute=True):
+            self.client.post(
+                f"/api/ordenes/{self.orden.pk}/entrega",
+                {
+                    "prendas": [
+                        {"prenda": self.camisa_1.pk, "coincide": False, "observacion": "Otro color"},
+                        {"prenda": self.camisa_2.pk, "coincide": True},
+                    ]
+                },
+                format="json",
+            )
+            self.client.post(
+                f"/api/ordenes/{self.orden.pk}/decision",
+                {"decision": "continuar", "observacion": "Ana acepta"},
+                format="json",
+            )
+
+        self.orden.refresh_from_db()
+        self.assertEqual(self.orden.estado, Orden.Estado.LISTA)
+        self.assertEqual(mail.outbox, [])
+        self.assertIsNone(self.ultimo_aviso())
+
+    def test_tras_un_reproceso_avisa_de_nuevo_al_quedar_lista(self):
+        self.cambiar_estado(Orden.Estado.EN_PROCESO)
+        self.cambiar_estado(Orden.Estado.CONTROL_CALIDAD)
+        self.cambiar_estado(Orden.Estado.LISTA)
+
+        self.assertEqual(len(mail.outbox), 1)
