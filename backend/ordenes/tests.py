@@ -1936,7 +1936,7 @@ JPEG = b"\xff\xd8\xff\xe0" + b"0" * 100
 PNG = b"\x89PNG\r\n\x1a\n" + b"0" * 100
 
 
-class NovedadApiTests(CatalogoDePruebaMixin, APITestCase):
+class OrdenEnProcesoMixin(CatalogoDePruebaMixin):
     def setUp(self):
         self.crear_catalogo()
         self.admin = User.objects.create_user(
@@ -1963,6 +1963,9 @@ class NovedadApiTests(CatalogoDePruebaMixin, APITestCase):
         cuerpo.update(datos)
         return self.client.post(self.url, {k: v for k, v in cuerpo.items() if v is not ...}, format="json")
 
+
+
+class NovedadApiTests(OrdenEnProcesoMixin, APITestCase):
     def assertSinCambios(self, estado=Orden.Estado.EN_PROCESO):
         self.orden.refresh_from_db()
         self.assertEqual(self.orden.estado, estado)
@@ -2167,3 +2170,174 @@ class NovedadApiTests(CatalogoDePruebaMixin, APITestCase):
         self.assertIn("detectada en la entrega", evento.detalle)
         self.assertIn("Falta un boton (sin foto)", evento.detalle)
         self.assertIn("Otro color (con foto)", evento.detalle)
+
+
+class DecisionNovedadApiTests(OrdenEnProcesoMixin, APITestCase):
+    url_lista = "/api/ordenes/novedades"
+
+    def decidir(self, decision, observacion="Hable con Ana por telefono", usuario=None):
+        self.client.force_authenticate(usuario or self.recepcionista)
+        return self.client.post(
+            f"/api/ordenes/{self.orden.pk}/decision",
+            {"decision": decision, "observacion": observacion},
+            format="json",
+        )
+
+    def novedad_en_la_entrega(self):
+        self.client.force_authenticate(self.recepcionista)
+        self.client.post(
+            f"/api/ordenes/{self.orden.pk}/pagos", {"monto": "12000", "metodo": "efectivo"}, format="json"
+        )
+        Orden.objects.filter(pk=self.orden.pk).update(estado=Orden.Estado.LISTA)
+        self.client.post(
+            f"/api/ordenes/{self.orden.pk}/entrega",
+            {
+                "prendas": [
+                    {"prenda": self.camisa_1.pk, "coincide": False, "observacion": "Falta un boton"},
+                    {"prenda": self.camisa_2.pk, "coincide": True},
+                ]
+            },
+            format="json",
+        )
+
+    def ultimo_evento(self):
+        return self.orden.historial.last()
+
+    def test_la_lista_muestra_cada_orden_con_novedad_y_sus_novedades_pendientes(self):
+        self.registrar_novedad()
+        self.client.force_authenticate(self.admin)
+
+        ordenes = self.client.get(self.url_lista).json()
+
+        self.assertEqual([o["codigo"] for o in ordenes], [self.orden.codigo])
+        novedad = ordenes[0]["novedades"][0]
+        self.assertEqual(ordenes[0]["operario_nombre"], "op")
+        self.assertEqual(
+            (novedad["prenda"], novedad["descripcion"], novedad["usuario_nombre"], novedad["origen"]),
+            (self.camisa_1.pk, "Mancha de tinta", "op", Novedad.Origen.PROCESO),
+        )
+        self.assertTrue(novedad["foto_url"] and novedad["creado_en"])
+
+    def test_la_lista_muestra_la_novedad_de_la_entrega_sin_foto_y_omite_las_resueltas(self):
+        self.novedad_en_la_entrega()
+        self.client.force_authenticate(self.recepcionista)
+
+        novedad = self.client.get(self.url_lista).json()[0]["novedades"][0]
+        self.assertEqual((novedad["origen"], novedad["foto_url"]), (Novedad.Origen.ENTREGA, None))
+
+        self.decidir(Novedad.Decision.CONTINUAR)
+        self.assertEqual(self.client.get(self.url_lista).json(), [])
+
+    def test_continuar_igual_devuelve_la_orden_al_estado_de_origen(self):
+        Orden.objects.filter(pk=self.orden.pk).update(estado=Orden.Estado.CONTROL_CALIDAD)
+        self.registrar_novedad()
+
+        response = self.decidir(Novedad.Decision.CONTINUAR)
+
+        self.assertEqual(response.status_code, 200, response.json())
+        self.orden.refresh_from_db()
+        self.assertEqual(self.orden.estado, Orden.Estado.CONTROL_CALIDAD)
+        novedad = Novedad.objects.get()
+        self.assertEqual(
+            (novedad.decision, novedad.decidida_por, novedad.decision_observacion),
+            (Novedad.Decision.CONTINUAR, self.recepcionista, "Hable con Ana por telefono"),
+        )
+        self.assertIsNotNone(novedad.decidida_en)
+        evento = self.ultimo_evento()
+        self.assertEqual(
+            (evento.tipo_evento, evento.usuario), (Evento.DECISION_NOVEDAD, self.recepcionista)
+        )
+        self.assertIn("Continuar igual: Hable con Ana por telefono", evento.detalle)
+        self.assertIn("→ Control de calidad", evento.detalle)
+
+    def test_continuar_tras_una_novedad_de_la_entrega_permite_entregar(self):
+        self.novedad_en_la_entrega()
+
+        self.decidir(Novedad.Decision.CONTINUAR)
+        self.orden.refresh_from_db()
+        self.assertEqual(self.orden.estado, Orden.Estado.LISTA)
+
+        entrega = self.client.post(
+            f"/api/ordenes/{self.orden.pk}/entrega",
+            {"prendas": [{"prenda": p.pk, "coincide": True} for p in (self.camisa_1, self.camisa_2)]},
+            format="json",
+        )
+        self.assertEqual(entrega.status_code, 200, entrega.json())
+        self.orden.refresh_from_db()
+        self.assertEqual(self.orden.estado, Orden.Estado.ENTREGADA)
+
+    def test_reprocesar_pasa_a_en_proceso_y_cuenta_el_reproceso_sin_costo(self):
+        self.novedad_en_la_entrega()
+        self.orden.refresh_from_db()
+        total = self.orden.valor_total
+
+        response = self.decidir(Novedad.Decision.REPROCESAR, usuario=self.admin)
+
+        self.assertEqual(response.status_code, 200, response.json())
+        self.orden.refresh_from_db()
+        self.assertEqual(
+            (self.orden.estado, self.orden.numero_reprocesos, self.orden.valor_total),
+            (Orden.Estado.EN_PROCESO, 1, total),
+        )
+        self.assertIn("Reprocesar", self.ultimo_evento().detalle)
+
+    def test_no_continuar_deja_la_orden_con_novedad_y_admite_otra_decision(self):
+        self.registrar_novedad()
+
+        response = self.decidir(Novedad.Decision.NO_CONTINUAR, "Ana no quiere seguir")
+
+        self.assertEqual(response.status_code, 200)
+        self.orden.refresh_from_db()
+        self.assertEqual(self.orden.estado, Orden.Estado.CON_NOVEDAD)
+        self.assertIn("La orden sigue Con novedad", self.ultimo_evento().detalle)
+        lista = self.client.get(self.url_lista).json()
+        self.assertEqual(lista[0]["novedades"][0]["decision"], Novedad.Decision.NO_CONTINUAR)
+
+        self.decidir(Novedad.Decision.CONTINUAR, "Ana cambio de opinion")
+
+        self.orden.refresh_from_db()
+        self.assertEqual(self.orden.estado, Orden.Estado.EN_PROCESO)
+        self.assertEqual(
+            self.orden.historial.filter(tipo_evento=Evento.DECISION_NOVEDAD).count(), 2
+        )
+
+    def test_sin_observacion_se_rechaza(self):
+        self.registrar_novedad()
+
+        response = self.decidir(Novedad.Decision.CONTINUAR, "  ")
+
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("con quien se hablo", response.json()["observacion"][0])
+        self.orden.refresh_from_db()
+        self.assertEqual(self.orden.estado, Orden.Estado.CON_NOVEDAD)
+
+    def test_el_operario_no_registra_la_decision_ni_ve_la_lista(self):
+        self.registrar_novedad()
+
+        self.assertEqual(self.decidir(Novedad.Decision.CONTINUAR, usuario=self.operario).status_code, 403)
+        self.assertEqual(self.client.get(self.url_lista).status_code, 403)
+        self.client.force_authenticate(None)
+        self.assertEqual(self.client.get(self.url_lista).status_code, 403)
+
+    def test_sin_novedad_pendiente_se_rechaza(self):
+        response = self.decidir(Novedad.Decision.CONTINUAR)
+
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("no tiene una novedad pendiente", str(response.json()))
+        self.assertFalse(self.orden.historial.filter(tipo_evento=Evento.DECISION_NOVEDAD).exists())
+
+    def test_si_la_base_falla_no_cambia_nada(self):
+        self.registrar_novedad()
+
+        with mock.patch(
+            "ordenes.serializers.registrar_evento", side_effect=OperationalError("sin conexion")
+        ), self.assertLogs("ordenes.historial", level="ERROR") as logs:
+            response = self.decidir(Novedad.Decision.REPROCESAR)
+
+        self.assertEqual(response.status_code, 503)
+        self.assertIn("sin conexion", "\n".join(logs.output))
+        self.orden.refresh_from_db()
+        self.assertEqual(
+            (self.orden.estado, self.orden.numero_reprocesos), (Orden.Estado.CON_NOVEDAD, 0)
+        )
+        self.assertIsNone(Novedad.objects.get().decision)

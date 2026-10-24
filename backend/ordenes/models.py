@@ -343,6 +343,7 @@ class HistorialOrden(models.Model):
         SERVICIO_AGREGADO = "servicio_agregado", "Servicio agregado"
         ENTREGA = "entrega", "Entrega"
         NOVEDAD = "novedad", "Novedad"
+        DECISION_NOVEDAD = "decision_novedad", "Decisión sobre la novedad"
 
     # PROTECT en ambos: borrar la orden o el usuario dejaria el historial
     # incompleto o sin autor.
@@ -384,10 +385,24 @@ class HistorialOrden(models.Model):
         raise PermissionDenied(MENSAJE_HISTORIAL_INMUTABLE)
 
 
+class NovedadQuerySet(models.QuerySet):
+    def pendientes(self):
+        # "No continuar" deja la orden retenida: la novedad sigue abierta hasta otra decision o la cancelacion.
+        return self.filter(
+            models.Q(decision__isnull=True) | models.Q(decision="no_continuar"),
+            orden__estado=Orden.Estado.CON_NOVEDAD,
+        )
+
+
 class Novedad(ModeloConAutoria):
     class Origen(models.TextChoices):
         PROCESO = "proceso", "Durante el proceso"
         ENTREGA = "entrega", "Detectada en la entrega"
+
+    class Decision(models.TextChoices):
+        CONTINUAR = "continuar", "Continuar igual"
+        REPROCESAR = "reprocesar", "Reprocesar"
+        NO_CONTINUAR = "no_continuar", "No continuar"
 
     orden = models.ForeignKey(Orden, on_delete=models.PROTECT, related_name="novedades")
     prenda = models.ForeignKey(Prenda, on_delete=models.PROTECT, related_name="novedades")
@@ -395,6 +410,18 @@ class Novedad(ModeloConAutoria):
     origen = models.CharField(max_length=20, choices=Origen.choices)
     # A donde vuelve la orden si el cliente decide continuar igual (HU19).
     estado_anterior = models.CharField(max_length=30, choices=Orden.Estado.choices)
+    decision = models.CharField(max_length=20, choices=Decision.choices, null=True, blank=True)
+    decision_observacion = models.TextField(blank=True)
+    decidida_por = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.PROTECT,
+        null=True,
+        blank=True,
+        related_name="decisiones_de_novedad",
+    )
+    decidida_en = models.DateTimeField(null=True, blank=True)
+
+    objects = NovedadQuerySet.as_manager()
 
     class Meta:
         verbose_name_plural = "novedades"
