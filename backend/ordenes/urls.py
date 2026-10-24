@@ -6,6 +6,7 @@ from .views import (
     AsignarOperarioView,
     BandejaOperarioView,
     CambiarEstadoView,
+    HistorialClienteView,
     HistorialOrdenView,
     OperariosActivosView,
     OrdenDetailView,
@@ -29,5 +30,6 @@ urlpatterns = [
     path("ordenes/<int:pk>/entrega", RegistrarEntregaView.as_view(), name="orden-entrega"),
     path("ordenes/<int:pk>/estado", CambiarEstadoView.as_view(), name="orden-estado"),
     path("ordenes/<int:pk>/historial", HistorialOrdenView.as_view(), name="orden-historial"),
+    path("clientes/<int:pk>/ordenes", HistorialClienteView.as_view(), name="cliente-ordenes"),
     path("operarios", OperariosActivosView.as_view(), name="operarios-activos"),
 ]

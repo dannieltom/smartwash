@@ -416,3 +416,10 @@ class OrdenBandejaSerializer(serializers.ModelSerializer):
         model = Orden
         fields = ("id", "codigo", "estado", "fecha_estimada_entrega", "prendas")
         read_only_fields = fields
+
+
+class OrdenHistorialClienteSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = Orden
+        fields = ("id", "codigo", "creado_en", "estado", "valor_total", "estado_pago")
+        read_only_fields = fields

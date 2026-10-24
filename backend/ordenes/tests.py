@@ -1,4 +1,5 @@
-from datetime import date
+from datetime import date, datetime
+from datetime import timezone as dt_timezone
 from decimal import Decimal
 from unittest import mock
 
@@ -1755,3 +1756,76 @@ class PrecioPorServicioTests(CatalogoDePruebaMixin, APITestCase):
                     self.assertEqual(self.client.patch(f"/api/catalogo/{ruta}", datos, format="json").status_code, 403)
         general.refresh_from_db()
         self.assertEqual(general.precio_por_kilo, Decimal("8000"))
+
+
+class HistorialClienteApiTests(APITestCase):
+    def setUp(self):
+        self.admin = User.objects.create_user(
+            username="admin", password="x", rol=User.Rol.ADMINISTRADOR
+        )
+        self.antigua = crear_orden(codigo="SW-ANTIGUA")
+        self.cancelada = crear_orden(codigo="SW-CANCELA")
+        self.reciente = crear_orden(codigo="SW-RECIENT")
+        self.cliente = self.antigua.cliente
+        for dia, orden, estado, total in (
+            (1, self.antigua, Orden.Estado.EN_ESPERA, "20000"),
+            (2, self.cancelada, Orden.Estado.CANCELADA, "50000"),
+            (3, self.reciente, Orden.Estado.RECIBIDA, "35000"),
+        ):
+            Orden.objects.filter(pk=orden.pk).update(
+                creado_en=datetime(2026, 5, dia, tzinfo=dt_timezone.utc), estado=estado, valor_total=Decimal(total)
+            )
+        otro = Cliente.objects.create(documento="555", nombre_completo="Otro", telefono="300")
+        Orden.objects.create(cliente=otro, recepcionista=self.antigua.recepcionista)
+        self.url = f"/api/clientes/{self.cliente.pk}/ordenes"
+
+    def test_lista_todas_las_ordenes_del_cliente_de_la_mas_reciente_a_la_mas_antigua(self):
+        self.client.force_login(self.admin)
+        response = self.client.get(self.url)
+
+        self.assertEqual(response.status_code, 200)
+        datos = response.json()
+        self.assertEqual(
+            [(o["codigo"], o["estado"], o["valor_total"]) for o in datos["ordenes"]],
+            [
+                ("SW-RECIENT", "Recibida", "35000.00"),
+                ("SW-CANCELA", "Cancelada", "50000.00"),
+                ("SW-ANTIGUA", "En espera", "20000.00"),
+            ],
+        )
+        self.assertTrue(all(o["creado_en"] and o["estado_pago"] for o in datos["ordenes"]))
+        self.assertEqual(datos["cliente"], {"id": self.cliente.pk, "nombre_completo": "Ana Gomez"})
+
+    def test_el_total_comprado_excluye_las_canceladas_y_el_conteo_las_incluye(self):
+        self.client.force_login(self.admin)
+        datos = self.client.get(self.url).json()
+
+        self.assertEqual(datos["numero_ordenes"], 3)
+        self.assertEqual(datos["total_comprado"], "55000.00")
+
+    def test_un_cliente_sin_ordenes_recibe_lista_vacia_y_total_cero(self):
+        nuevo = Cliente.objects.create(documento="777", nombre_completo="Nuevo", telefono="301")
+        self.client.force_login(self.admin)
+        datos = self.client.get(f"/api/clientes/{nuevo.pk}/ordenes").json()
+
+        self.assertEqual(
+            (datos["ordenes"], datos["numero_ordenes"], datos["total_comprado"]), ([], 0, "0.00")
+        )
+
+    def test_un_cliente_inexistente_responde_404(self):
+        self.client.force_login(self.admin)
+        self.assertEqual(self.client.get("/api/clientes/9999/ordenes").status_code, 404)
+
+    def test_la_recepcionista_consulta_y_el_operario_recibe_403(self):
+        self.client.force_login(self.antigua.recepcionista)
+        self.assertEqual(self.client.get(self.url).status_code, 200)
+
+        operario = User.objects.create_user(username="op", password="x", rol=User.Rol.OPERARIO)
+        self.client.force_login(operario)
+        self.assertEqual(self.client.get(self.url).status_code, 403)
+
+    def test_la_consulta_no_permite_escribir(self):
+        self.client.force_login(self.admin)
+        for metodo in ("post", "put", "patch", "delete"):
+            response = getattr(self.client, metodo)(self.url, {}, format="json")
+            self.assertEqual(response.status_code, 405, metodo)

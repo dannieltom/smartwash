@@ -1,3 +1,4 @@
+from django.db.models import Sum
 from django.shortcuts import get_object_or_404
 from django.utils import timezone
 from rest_framework import generics, serializers, status
@@ -7,6 +8,7 @@ from rest_framework.response import Response
 from rest_framework.views import APIView
 
 from accounts.models import User
+from clientes.models import Cliente
 from core.permissions import (
     AdministradorORecepcionista,
     OperarioSoloSusOrdenes,
@@ -24,6 +26,7 @@ from .serializers import (
     HistorialOrdenSerializer,
     OperarioSerializer,
     OrdenBandejaSerializer,
+    OrdenHistorialClienteSerializer,
     OrdenSerializer,
     PrendaEntradaSerializer,
     agregar_prenda,
@@ -220,3 +223,25 @@ class HistorialOrdenView(generics.ListAPIView):
     def get_queryset(self):
         orden = get_object_or_404(Orden, pk=self.kwargs["pk"])
         return orden.historial.select_related("usuario")
+
+
+class HistorialClienteView(APIView):
+    permission_classes = [AdministradorORecepcionista]
+
+    def get(self, request, pk):
+        cliente = get_object_or_404(Cliente, pk=pk)
+        ordenes = cliente.ordenes.order_by("-creado_en", "-id")
+        # Las canceladas se listan pero no son compra.
+        total = ordenes.exclude(estado=Orden.Estado.CANCELADA).aggregate(
+            total=Sum("valor_total")
+        )["total"]
+        return Response(
+            {
+                "cliente": {"id": cliente.pk, "nombre_completo": cliente.nombre_completo},
+                "numero_ordenes": ordenes.count(),
+                "total_comprado": serializers.DecimalField(
+                    max_digits=12, decimal_places=2
+                ).to_representation(total or 0),
+                "ordenes": OrdenHistorialClienteSerializer(ordenes, many=True).data,
+            }
+        )
