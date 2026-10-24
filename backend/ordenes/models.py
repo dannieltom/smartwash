@@ -47,6 +47,7 @@ class Orden(ModeloConAutoria):
         ENTREGADA = "Entregada", "Entregada"
         CANCELADA = "Cancelada", "Cancelada"
         EN_ESPERA = "En espera", "En espera"
+        CON_NOVEDAD = "Con novedad", "Con novedad"
 
     # Entregada no figura: solo se llega por /entrega, que verifica las prendas.
     TRANSICIONES = {
@@ -158,6 +159,13 @@ class Orden(ModeloConAutoria):
         )
 
     def cambiar_estado(self, nuevo):
+        if self.estado == self.Estado.CON_NOVEDAD:
+            raise ValidationError(
+                {
+                    "estado": "La orden tiene una novedad pendiente: no avanza hasta que "
+                    "se registre la decision del cliente."
+                }
+            )
         if self.estado == self.Estado.EN_ESPERA:
             falta = max(self.abono_requerido - self.total_pagado(), Decimal("0"))
             raise ValidationError(
@@ -334,6 +342,7 @@ class HistorialOrden(models.Model):
         PRENDA_AGREGADA = "prenda_agregada", "Prenda agregada"
         SERVICIO_AGREGADO = "servicio_agregado", "Servicio agregado"
         ENTREGA = "entrega", "Entrega"
+        NOVEDAD = "novedad", "Novedad"
 
     # PROTECT en ambos: borrar la orden o el usuario dejaria el historial
     # incompleto o sin autor.
@@ -373,3 +382,39 @@ class HistorialOrden(models.Model):
 
     def delete(self, *args, **kwargs):
         raise PermissionDenied(MENSAJE_HISTORIAL_INMUTABLE)
+
+
+class Novedad(ModeloConAutoria):
+    class Origen(models.TextChoices):
+        PROCESO = "proceso", "Durante el proceso"
+        ENTREGA = "entrega", "Detectada en la entrega"
+
+    orden = models.ForeignKey(Orden, on_delete=models.PROTECT, related_name="novedades")
+    prenda = models.ForeignKey(Prenda, on_delete=models.PROTECT, related_name="novedades")
+    descripcion = models.TextField()
+    origen = models.CharField(max_length=20, choices=Origen.choices)
+    # A donde vuelve la orden si el cliente decide continuar igual (HU19).
+    estado_anterior = models.CharField(max_length=30, choices=Orden.Estado.choices)
+
+    class Meta:
+        verbose_name_plural = "novedades"
+        ordering = ("creado_en", "id")
+
+    def __str__(self):
+        return f"{self.orden.codigo} · {self.prenda} · {self.get_origen_display()}"
+
+
+class FotoNovedad(ModeloConAutoria):
+    # ponytail: base64 en la base por decision del PO (max. 500 KB); pasar a
+    # almacenamiento de objetos cambia solo este modelo y la vista de la foto.
+    novedad = models.OneToOneField(Novedad, on_delete=models.CASCADE, related_name="foto")
+    contenido = models.TextField()
+    tipo = models.CharField(max_length=20)
+    tamano = models.PositiveIntegerField(help_text="Bytes de la imagen decodificada.")
+
+    class Meta:
+        verbose_name = "foto de la novedad"
+        verbose_name_plural = "fotos de novedades"
+
+    def __str__(self):
+        return f"Foto de {self.novedad}"

@@ -1,5 +1,8 @@
+import base64
+import binascii
 from decimal import Decimal
 
+from django.urls import reverse
 from django.utils import timezone
 from rest_framework import serializers
 
@@ -9,7 +12,7 @@ from catalogo.precios import calcular_precio
 from clientes.models import Cliente
 
 from .historial import operacion_sobre_orden, registrar_evento
-from .models import HistorialOrden, Orden, OrdenServicio, Prenda
+from .models import FotoNovedad, HistorialOrden, Novedad, Orden, OrdenServicio, Prenda
 
 Evento = HistorialOrden.TipoEvento
 ESTADOS_QUE_ADMITEN_LINEAS = (
@@ -343,10 +346,127 @@ class CambioEstadoSerializer(serializers.Serializer):
     estado = serializers.ChoiceField(choices=Orden.Estado.choices)
 
 
+LIMITE_FOTO_BYTES = 500 * 1024
+FIRMAS_DE_IMAGEN = ((b"\xff\xd8\xff", "image/jpeg"), (b"\x89PNG\r\n\x1a\n", "image/png"))
+
+
+def tipo_de_imagen(datos):
+    # Se miran los bytes y no el tipo que declara el data URL: ese lo escribe el cliente.
+    for firma, tipo in FIRMAS_DE_IMAGEN:
+        if datos.startswith(firma):
+            return tipo
+    if datos[:4] == b"RIFF" and datos[8:12] == b"WEBP":
+        return "image/webp"
+    return None
+
+
+class FotoField(serializers.CharField):
+    """Acepta un data URL (data:image/jpeg;base64,...) o el base64 sin prefijo."""
+
+    def to_internal_value(self, valor):
+        _, _, codificado = super().to_internal_value(valor).rpartition("base64,")
+        try:
+            datos = base64.b64decode(codificado, validate=True)
+        except (binascii.Error, ValueError):
+            raise serializers.ValidationError("La foto no es un base64 valido.")
+        tipo = tipo_de_imagen(datos)
+        if tipo is None:
+            raise serializers.ValidationError("El archivo no es una imagen JPEG, PNG o WebP.")
+        if len(datos) > LIMITE_FOTO_BYTES:
+            raise serializers.ValidationError(
+                f"La foto pesa {len(datos) // 1024} KB; el maximo es 500 KB."
+            )
+        return {"contenido": base64.b64encode(datos).decode(), "tipo": tipo, "tamano": len(datos)}
+
+
+def registrar_novedades(orden, novedades, origen, usuario):
+    """Guarda las novedades [(prenda, descripcion, foto)] y deja la orden "Con novedad".
+
+    Varias prendas generan una novedad cada una pero un solo evento en el historial.
+    """
+    anterior = orden.estado
+    resumen = []
+    for prenda, descripcion, foto in novedades:
+        novedad = Novedad(
+            orden=orden,
+            prenda=prenda,
+            descripcion=descripcion,
+            origen=origen,
+            estado_anterior=anterior,
+        )
+        novedad.registrar_autoria(usuario)
+        novedad.save()
+        if foto:
+            foto = FotoNovedad(novedad=novedad, **foto)
+            foto.registrar_autoria(usuario)
+            foto.save()
+        resumen.append(f"{prenda}: {descripcion} ({'con foto' if foto else 'sin foto'})")
+    orden.estado = Orden.Estado.CON_NOVEDAD
+    orden.registrar_autoria(usuario)
+    orden.save()
+    registrar_evento(
+        orden,
+        Evento.NOVEDAD,
+        usuario,
+        f"{anterior} → {orden.estado}, {Novedad.Origen(origen).label.lower()}. "
+        + "; ".join(resumen),
+    )
+
+
+class NovedadEntradaSerializer(serializers.Serializer):
+    prenda = serializers.IntegerField()
+    descripcion = serializers.CharField(
+        error_messages={
+            "required": "La descripcion es obligatoria.",
+            "blank": "La descripcion es obligatoria.",
+        }
+    )
+    foto = FotoField(
+        error_messages={
+            "required": "La fotografia es obligatoria.",
+            "blank": "La fotografia es obligatoria.",
+            "null": "La fotografia es obligatoria.",
+        }
+    )
+
+
+class NovedadSerializer(serializers.ModelSerializer):
+    prenda_nombre = serializers.CharField(source="prenda.__str__", read_only=True)
+    origen_nombre = serializers.CharField(source="get_origen_display", read_only=True)
+    usuario_nombre = serializers.SerializerMethodField()
+    foto_url = serializers.SerializerMethodField()
+
+    class Meta:
+        model = Novedad
+        fields = (
+            "id",
+            "orden",
+            "prenda",
+            "prenda_nombre",
+            "descripcion",
+            "origen",
+            "origen_nombre",
+            "estado_anterior",
+            "usuario_nombre",
+            "creado_en",
+            "foto_url",
+        )
+        read_only_fields = fields
+
+    def get_usuario_nombre(self, novedad) -> str | None:
+        return nombre_usuario(novedad.creado_por) if novedad.creado_por else None
+
+    def get_foto_url(self, novedad) -> str | None:
+        if not hasattr(novedad, "foto"):
+            return None
+        return reverse("novedad-foto", args=[novedad.pk])
+
+
 class VerificacionPrendaSerializer(serializers.Serializer):
     prenda = serializers.IntegerField()
     coincide = serializers.BooleanField()
     observacion = serializers.CharField(required=False, allow_blank=True, default="")
+    foto = FotoField(required=False, allow_null=True, default=None)
 
     def validate(self, attrs):
         attrs["observacion"] = attrs["observacion"].strip()
@@ -365,22 +485,18 @@ class EntregaSerializer(serializers.Serializer):
     )
 
     def verificar_contra(self, orden):
-        """Devuelve el detalle para el historial; exige cada prenda una sola vez."""
+        """Exige cada prenda una sola vez y devuelve las que no coinciden como novedades."""
         verificaciones = self.validated_data["prendas"]
         registradas = {p.pk: p for p in orden.prendas.select_related("tipo_prenda", "material")}
         if sorted(v["prenda"] for v in verificaciones) != sorted(registradas):
             raise serializers.ValidationError(
                 {"prendas": "Hay que verificar cada prenda de la orden, una sola vez."}
             )
-        discrepancias = [
-            f"{registradas[v['prenda']]}: {v['observacion']}"
+        return [
+            (registradas[v["prenda"]], v["observacion"], v["foto"])
             for v in verificaciones
             if not v["coincide"]
         ]
-        detalle = f"{len(registradas)} prendas verificadas"
-        if discrepancias:
-            return f"{detalle}. Discrepancias: " + "; ".join(discrepancias)
-        return f"{detalle}, todas coinciden con lo solicitado"
 
 
 
