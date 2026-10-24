@@ -2,6 +2,7 @@ import base64
 from datetime import timedelta
 
 from django.conf import settings
+from django.db import transaction
 from django.db.models import Prefetch, Sum
 from django.http import HttpResponse
 from django.shortcuts import get_object_or_404
@@ -21,6 +22,7 @@ from core.permissions import (
     SoloOperario,
 )
 
+from .avisos import avisar_orden_lista
 from .historial import operacion_sobre_orden, registrar_evento
 from .models import (
     FotoNovedad,
@@ -254,6 +256,8 @@ class CambiarEstadoView(APIView):
             if nuevo == Orden.Estado.EN_PROCESO and anterior == Orden.Estado.CONTROL_CALIDAD:
                 detalle += f" (reproceso {orden.numero_reprocesos})"
             registrar_evento(orden, Evento.CAMBIO_ESTADO, request.user, detalle)
+            if nuevo == Orden.Estado.LISTA:
+                transaction.on_commit(lambda: avisar_orden_lista(orden))
         return Response(OrdenSerializer(ordenes_con_detalle().get(pk=orden.pk)).data)
 
 

@@ -372,6 +372,7 @@ class HistorialOrden(models.Model):
         ENTREGA = "entrega", "Entrega"
         NOVEDAD = "novedad", "Novedad"
         DECISION_NOVEDAD = "decision_novedad", "Decisión sobre la novedad"
+        NOTIFICACION = "notificacion", "Notificación al cliente"
 
     # PROTECT en ambos: borrar la orden o el usuario dejaria el historial
     # incompleto o sin autor.
