@@ -1,8 +1,7 @@
 import { cookies } from "next/headers";
 import { redirect } from "next/navigation";
 
-import { getCurrentUser } from "@/lib/api";
-import { getAlertasOrdenes } from "@/lib/ordenes";
+import { getAlertasOrdenes, getCurrentUser } from "@/lib/api";
 import { ClayCard, Encabezado } from "../../components/ui/clay";
 import ListaAlertas from "./lista-alertas";
 

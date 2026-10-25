@@ -1,7 +1,7 @@
 import Link from "next/link";
 
 import { formatFecha } from "@/lib/format";
-import type { AlertaOrden } from "@/lib/ordenes";
+import type { AlertaOrden } from "@/lib/api";
 import { ClayCard } from "../../components/ui/clay";
 
 const ESTILO = {

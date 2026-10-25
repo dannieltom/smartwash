@@ -544,6 +544,25 @@ export async function getBandeja(cookieStore: CookieStore): Promise<OrdenDeBande
   return fetchBackend<OrdenDeBandeja[]>("/ordenes/bandeja", cookieStore);
 }
 
+/** Lo que devuelve OrdenAlertaSerializer. `dias` es el retraso si la orden esta
+ * retrasada y lo que falta si esta proxima (0 = vence hoy). */
+export type AlertaOrden = {
+  id: number;
+  codigo: string;
+  cliente_nombre: string;
+  estado: EstadoOrden | "Con novedad";
+  operario: number | null;
+  fecha_estimada_entrega: string;
+  tipo: "retrasada" | "proxima";
+  dias: number;
+};
+
+/** Ordenes retrasadas o proximas a vencer (HU16). Al operario el backend le
+ * devuelve solo las suyas. */
+export async function getAlertasOrdenes(cookieStore: CookieStore): Promise<AlertaOrden[] | null> {
+  return fetchBackend<AlertaOrden[]>("/ordenes/alertas", cookieStore);
+}
+
 export async function crearOrden(cliente: number, prendas: PrendaFormulario[]): Promise<Response> {
   return api("/ordenes", { method: "POST", body: { cliente, prendas } });
 }
