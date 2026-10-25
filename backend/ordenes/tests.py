@@ -2737,3 +2737,76 @@ class CancelarOrdenApiTests(CatalogoDePruebaMixin, APITestCase):
 
         self.assertEqual([o["estado"] for o in response.json()], ["Cancelada"])
         self.assertEqual(self.orden.historial.first().tipo_evento, Evento.CREACION)
+
+
+class CancelarOrdenConNovedadApiTests(OrdenEnProcesoMixin, APITestCase):
+    def decidir(self, decision):
+        self.client.force_authenticate(self.recepcionista)
+        return self.client.post(
+            f"/api/ordenes/{self.orden.pk}/decision",
+            {"decision": decision, "observacion": "Hable con Ana por telefono"},
+            format="json",
+        )
+
+    def cancelar(self, usuario=None):
+        self.client.force_authenticate(usuario or self.recepcionista)
+        return self.client.post(
+            f"/api/ordenes/{self.orden.pk}/cancelacion",
+            {"motivo": "El cliente no acepta la prenda manchada"},
+            format="json",
+        )
+
+    def test_se_cancela_la_orden_con_novedad_que_el_cliente_decidio_no_continuar(self):
+        self.client.force_authenticate(self.recepcionista)
+        self.client.post(
+            f"/api/ordenes/{self.orden.pk}/pagos", {"monto": "5000", "metodo": "efectivo"}, format="json"
+        )
+        self.registrar_novedad()
+        self.decidir(Novedad.Decision.NO_CONTINUAR)
+
+        for usuario in (self.recepcionista, self.admin):
+            with self.subTest(usuario=usuario.username):
+                Orden.objects.filter(pk=self.orden.pk).update(estado=Orden.Estado.CON_NOVEDAD)
+
+                response = self.cancelar(usuario)
+
+                self.assertEqual(response.status_code, 200, response.json())
+                self.assertEqual(response.json()["estado"], "Cancelada")
+                cancelacion = self.orden.historial.filter(tipo_evento=Evento.CANCELACION).last()
+                self.assertEqual(cancelacion.usuario, usuario)
+                self.assertEqual(
+                    cancelacion.detalle,
+                    "Con novedad → Cancelada. Motivo: El cliente no acepta la prenda manchada"
+                    ". Sale de la bandeja de op",
+                )
+                devolucion = self.orden.historial.filter(tipo_evento=Evento.DEVOLUCION).last()
+                self.assertRegex(devolucion.detalle, r"^\$5000(\.00)? devueltos al cliente\.")
+                Orden.objects.filter(pk=self.orden.pk).update(operario=self.operario)
+
+        self.client.force_authenticate(self.admin)
+        self.assertEqual(self.client.get("/api/ordenes/novedades").json(), [])
+
+    def test_rechaza_cancelar_la_orden_con_novedad_sin_decision(self):
+        self.registrar_novedad()
+
+        response = self.cancelar()
+
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("el servicio ya inicio", str(response.json()))
+        self.orden.refresh_from_db()
+        self.assertEqual(self.orden.estado, Orden.Estado.CON_NOVEDAD)
+        self.assertFalse(self.orden.historial.filter(tipo_evento=Evento.CANCELACION).exists())
+
+    def test_rechaza_cancelar_si_el_cliente_decidio_continuar_o_reprocesar(self):
+        for decision in (Novedad.Decision.CONTINUAR, Novedad.Decision.REPROCESAR):
+            with self.subTest(decision=decision):
+                Orden.objects.filter(pk=self.orden.pk).update(estado=Orden.Estado.EN_PROCESO)
+                self.registrar_novedad()
+                self.decidir(decision)
+
+                response = self.cancelar()
+
+                self.assertEqual(response.status_code, 400)
+                self.assertIn("el servicio ya inicio", str(response.json()))
+
+        self.assertFalse(self.orden.historial.filter(tipo_evento=Evento.CANCELACION).exists())

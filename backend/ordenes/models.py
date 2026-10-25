@@ -165,9 +165,16 @@ class Orden(ModeloConAutoria):
                 {"estado": "La orden esta cancelada; la cancelacion es definitiva."}
             )
 
+    def rechazada_por_el_cliente(self):
+        if self.estado != self.Estado.CON_NOVEDAD:
+            return False
+        ultima = self.novedades.order_by("creado_en", "id").last()
+        return ultima is not None and ultima.decision == Novedad.Decision.NO_CONTINUAR
+
     def cancelar(self, motivo):
         self.exigir_no_cancelada()
-        if self.estado not in self.ESTADOS_CANCELABLES:
+        # "Con novedad" + "no continuar" ya inicio el servicio, pero sin cancelar no tendria salida (HU19).
+        if self.estado not in self.ESTADOS_CANCELABLES and not self.rechazada_por_el_cliente():
             raise ValidationError(
                 {
                     "estado": f'La orden esta "{self.estado}": el servicio ya inicio '
