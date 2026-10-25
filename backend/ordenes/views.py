@@ -36,6 +36,7 @@ from .serializers import (
     AgregarServicioSerializer,
     AsignacionSerializer,
     CambioEstadoSerializer,
+    CancelacionSerializer,
     DecisionNovedadSerializer,
     EntregaSerializer,
     HistorialOrdenSerializer,
@@ -53,6 +54,7 @@ from .serializers import (
     asignar_operario,
     exigir_orden_editable,
     guardar_recalculo,
+    nombre_usuario,
     operarios_activos,
     registrar_decision,
     registrar_novedades,
@@ -258,6 +260,36 @@ class CambiarEstadoView(APIView):
             registrar_evento(orden, Evento.CAMBIO_ESTADO, request.user, detalle)
             if nuevo == Orden.Estado.LISTA:
                 transaction.on_commit(lambda: avisar_orden_lista(orden))
+        return Response(OrdenSerializer(ordenes_con_detalle().get(pk=orden.pk)).data)
+
+
+class CancelarOrdenView(APIView):
+    permission_classes = [AdministradorORecepcionista]
+
+    def post(self, request, pk):
+        entrada = CancelacionSerializer(data=request.data)
+        entrada.is_valid(raise_exception=True)
+        motivo = entrada.validated_data["motivo"]
+        with operacion_sobre_orden():
+            orden = get_object_or_404(Orden.objects.select_for_update(), pk=pk)
+            anterior = orden.estado
+            operario = orden.operario
+            orden.cancelar(motivo)
+            orden.registrar_autoria(request.user)
+            orden.save()
+            detalle = f"{anterior} → {orden.estado}. Motivo: {motivo}"
+            if operario is not None:
+                detalle += f". Sale de la bandeja de {nombre_usuario(operario)}"
+            registrar_evento(orden, Evento.CANCELACION, request.user, detalle)
+            # Los pagos no se tocan: la devolucion queda solo en el historial.
+            pagado = orden.total_pagado()
+            if pagado > 0:
+                registrar_evento(
+                    orden,
+                    Evento.DEVOLUCION,
+                    request.user,
+                    f"${pagado} devueltos al cliente. Motivo: {motivo}",
+                )
         return Response(OrdenSerializer(ordenes_con_detalle().get(pk=orden.pk)).data)
 
 

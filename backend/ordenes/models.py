@@ -56,6 +56,7 @@ class Orden(ModeloConAutoria):
         Estado.EN_PROCESO: (Estado.CONTROL_CALIDAD,),
         Estado.CONTROL_CALIDAD: (Estado.LISTA, Estado.EN_PROCESO),
     }
+    ESTADOS_CANCELABLES = (Estado.EN_ESPERA, Estado.RECIBIDA, Estado.CLASIFICADA)
 
     class EstadoPago(models.TextChoices):
         PENDIENTE = "Pendiente", "Pendiente"
@@ -158,7 +159,34 @@ class Orden(ModeloConAutoria):
             }
         )
 
+    def exigir_no_cancelada(self):
+        if self.estado == self.Estado.CANCELADA:
+            raise ValidationError(
+                {"estado": "La orden esta cancelada; la cancelacion es definitiva."}
+            )
+
+    def rechazada_por_el_cliente(self):
+        if self.estado != self.Estado.CON_NOVEDAD:
+            return False
+        ultima = self.novedades.order_by("creado_en", "id").last()
+        return ultima is not None and ultima.decision == Novedad.Decision.NO_CONTINUAR
+
+    def cancelar(self, motivo):
+        self.exigir_no_cancelada()
+        # "Con novedad" + "no continuar" ya inicio el servicio, pero sin cancelar no tendria salida (HU19).
+        if self.estado not in self.ESTADOS_CANCELABLES and not self.rechazada_por_el_cliente():
+            raise ValidationError(
+                {
+                    "estado": f'La orden esta "{self.estado}": el servicio ya inicio '
+                    "y no se puede cancelar."
+                }
+            )
+        self.estado = self.Estado.CANCELADA
+        self.motivo_cancelacion = motivo
+        self.operario = None
+
     def cambiar_estado(self, nuevo):
+        self.exigir_no_cancelada()
         if self.estado == self.Estado.CON_NOVEDAD:
             raise ValidationError(
                 {
@@ -373,6 +401,8 @@ class HistorialOrden(models.Model):
         NOVEDAD = "novedad", "Novedad"
         DECISION_NOVEDAD = "decision_novedad", "Decisión sobre la novedad"
         NOTIFICACION = "notificacion", "Notificación al cliente"
+        CANCELACION = "cancelacion", "Cancelación"
+        DEVOLUCION = "devolucion", "Devolución"
 
     # PROTECT en ambos: borrar la orden o el usuario dejaria el historial
     # incompleto o sin autor.
