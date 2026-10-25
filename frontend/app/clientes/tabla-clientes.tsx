@@ -1,9 +1,10 @@
 "use client";
 
+import Link from "next/link";
 import { Fragment, useState } from "react";
 
 import type { Cliente } from "@/lib/api";
-import { ClayBadge, ClayButton, ClayCard } from "../components/ui/clay";
+import { ClayBadge, ClayButton, ClayCard, clayBtnClass } from "../components/ui/clay";
 import ClienteForm from "./cliente-form";
 
 export default function TablaClientes({ clientes }: { clientes: Cliente[] }) {
@@ -41,15 +42,20 @@ export default function TablaClientes({ clientes }: { clientes: Cliente[] }) {
                 <td data-label="Clasificacion" className="px-5 py-3">
                   <ClayBadge color="mint">{cliente.clasificacion}</ClayBadge>
                 </td>
-                <td className="px-5 py-3 text-right">
-                  <ClayButton
-                    type="button"
-                    variant="secundario"
-                    disabled={editandoId === cliente.id}
-                    onClick={() => setEditandoId(cliente.id)}
-                  >
-                    Editar
-                  </ClayButton>
+                <td className="px-5 py-3">
+                  <div className="flex justify-end gap-2">
+                    <Link href={`/clientes/${cliente.id}/ordenes`} className={clayBtnClass("secundario")}>
+                      Historial
+                    </Link>
+                    <ClayButton
+                      type="button"
+                      variant="secundario"
+                      disabled={editandoId === cliente.id}
+                      onClick={() => setEditandoId(cliente.id)}
+                    >
+                      Editar
+                    </ClayButton>
+                  </div>
                 </td>
               </tr>
               {editandoId === cliente.id && (
