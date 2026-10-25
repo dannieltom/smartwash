@@ -41,6 +41,17 @@ export default function CambiarEstado({ orden, usuario }: { orden: Orden; usuari
   const [errores, setErrores] = useState<string[]>([]);
   const [pending, setPending] = useState(false);
 
+  if (orden.estado === "Con novedad") {
+    return (
+      <ClayCard className="mb-6">
+        <p className="text-sm text-(--sw-ink-soft)">
+          La orden tiene una novedad registrada: no se puede avanzar hasta que se registre la decision del
+          cliente.
+        </p>
+      </ClayCard>
+    );
+  }
+
   if (orden.estado === "En espera") {
     return (
       <ClayCard className="mb-6">

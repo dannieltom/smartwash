@@ -7,13 +7,19 @@ import { AlertaErrores } from "@/app/catalogo/errores";
 import { registrarEntrega, type Orden } from "@/lib/api";
 import { formatCOP } from "@/lib/format";
 import { ClayButton, ClayCard, ClayTextarea } from "../../components/ui/clay";
+import CampoFoto from "../campo-foto";
 import { mensajesDeOrden } from "../errores";
+import type { FotoLista } from "../foto";
 
 // null mientras la recepcionista no ha revisado la prenda: no se asume que coincide.
-type Revision = { coincide: boolean | null; observacion: string };
+type Revision = { coincide: boolean | null; observacion: string; foto: FotoLista | null };
+
+// El backend limita el cuerpo de la peticion a 2,5 MB: mas de 3 fotos de 500 KB
+// en base64 lo superarian.
+const MAXIMO_FOTOS = 3;
 
 function revisionesVacias(orden: Orden): Record<number, Revision> {
-  return Object.fromEntries(orden.detalle_prendas.map((p) => [p.id, { coincide: null, observacion: "" }]));
+  return Object.fromEntries(orden.detalle_prendas.map((p) => [p.id, { coincide: null, observacion: "", foto: null }]));
 }
 
 export default function RegistrarEntrega({ orden }: { orden: Orden }) {
@@ -28,12 +34,15 @@ export default function RegistrarEntrega({ orden }: { orden: Orden }) {
     return r.coincide === true || (r.coincide === false && r.observacion.trim() !== "");
   });
 
+  const fotos = Object.values(revisiones).filter((r) => r.coincide === false && r.foto).length;
+  const hayDiscrepancias = Object.values(revisiones).some((r) => r.coincide === false);
+
   function revisar(prenda: number, cambios: Partial<Revision>) {
     setRevisiones((actual) => ({ ...actual, [prenda]: { ...actual[prenda], ...cambios } }));
   }
 
   function marcarTodas() {
-    setRevisiones(Object.fromEntries(orden.detalle_prendas.map((p) => [p.id, { coincide: true, observacion: "" }])));
+    setRevisiones(Object.fromEntries(orden.detalle_prendas.map((p) => [p.id, { coincide: true, observacion: "", foto: null }])));
   }
 
   function cancelar() {
@@ -50,6 +59,7 @@ export default function RegistrarEntrega({ orden }: { orden: Orden }) {
       prenda: p.id,
       coincide: revisiones[p.id].coincide === true,
       observacion: revisiones[p.id].observacion.trim(),
+      foto: revisiones[p.id].coincide === false ? (revisiones[p.id].foto?.dataUrl ?? null) : null,
     }));
     const response = await registrarEntrega(orden.id, prendas).catch(() => null);
     setPending(false);
@@ -126,7 +136,7 @@ export default function RegistrarEntrega({ orden }: { orden: Orden }) {
                     type="radio"
                     name={nombre}
                     checked={revision.coincide === true}
-                    onChange={() => revisar(prenda.id, { coincide: true, observacion: "" })}
+                    onChange={() => revisar(prenda.id, { coincide: true, observacion: "", foto: null })}
                     required
                   />
                   Coincide con lo solicitado
@@ -151,14 +161,32 @@ export default function RegistrarEntrega({ orden }: { orden: Orden }) {
                   required
                 />
               )}
+              {revision.coincide === false && (
+                <CampoFoto
+                  etiqueta="Foto de la discrepancia"
+                  foto={revision.foto}
+                  onChange={(foto) => revisar(prenda.id, { foto })}
+                />
+              )}
             </fieldset>
           );
         })}
 
+        {hayDiscrepancias && (
+          <p className="text-sm text-(--sw-ink-soft)">
+            Con alguna prenda que no coincide, la orden no se entrega: queda &quot;Con novedad&quot; hasta
+            que el cliente decida.
+          </p>
+        )}
+        {fotos > MAXIMO_FOTOS && (
+          <p role="alert" className="text-sm font-semibold text-(--sw-ink)">
+            Adjunta como maximo {MAXIMO_FOTOS} fotos por entrega ({fotos} seleccionadas).
+          </p>
+        )}
         <AlertaErrores titulo="No se pudo registrar la entrega" errores={errores} />
         <div className="flex flex-wrap gap-3">
-          <ClayButton type="submit" disabled={pending || !completa}>
-            {pending ? "Registrando..." : "Confirmar entrega"}
+          <ClayButton type="submit" disabled={pending || !completa || fotos > MAXIMO_FOTOS}>
+            {pending ? "Registrando..." : hayDiscrepancias ? "Registrar novedad" : "Confirmar entrega"}
           </ClayButton>
           <ClayButton type="button" variant="secundario" onClick={cancelar} disabled={pending}>
             Cancelar

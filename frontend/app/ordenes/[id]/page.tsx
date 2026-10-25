@@ -6,6 +6,7 @@ import type { ReactNode } from "react";
 import {
   getCurrentUser,
   getMateriales,
+  getNovedadesOrden,
   getOperarios,
   getOrden,
   getPagosOrden,
@@ -24,8 +25,10 @@ import AgregarPrenda from "./agregar-prenda";
 import AgregarServicio from "./agregar-servicio";
 import AsignarOperario from "./asignar-operario";
 import CambiarEstado from "./cambiar-estado";
+import NovedadesOrden from "./novedades-orden";
 import PagosOrden from "./pagos-orden";
 import RegistrarEntrega from "./registrar-entrega";
+import RegistrarNovedad from "./registrar-novedad";
 
 const ESTADOS_QUE_ADMITEN_LINEAS: EstadoOrden[] = ["En espera", "Recibida", "Clasificada"];
 
@@ -53,7 +56,7 @@ export default async function OrdenPage({
   const { registrada } = await searchParams;
   const puedeEditar = user.rol !== "operario";
 
-  const [orden, tiposPrenda, materiales, servicios, tarifas, pagos, operarios] = await Promise.all([
+  const [orden, tiposPrenda, materiales, servicios, tarifas, pagos, operarios, novedades] = await Promise.all([
     getOrden(id, cookieStore),
     puedeEditar ? getTiposPrenda(cookieStore) : null,
     puedeEditar ? getMateriales(cookieStore) : null,
@@ -61,6 +64,7 @@ export default async function OrdenPage({
     puedeEditar ? getTarifas(cookieStore, true) : null,
     puedeEditar ? getPagosOrden(id, cookieStore) : null,
     puedeEditar ? getOperarios(cookieStore) : null,
+    getNovedadesOrden(id, cookieStore),
   ]);
 
   if (orden === null) {
@@ -119,6 +123,8 @@ export default async function OrdenPage({
 
       {puedeEditar && orden.estado === "Lista para entrega" && <RegistrarEntrega orden={orden} />}
       <CambiarEstado orden={orden} usuario={user} />
+      <RegistrarNovedad orden={orden} usuario={user} />
+      {novedades && <NovedadesOrden novedades={novedades} />}
       {puedeEditar && <AsignarOperario orden={orden} operarios={operarios} usuario={user} />}
 
       <ClayCard className="mb-6">
