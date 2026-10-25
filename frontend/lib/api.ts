@@ -160,6 +160,29 @@ export async function actualizarCliente(
   return api(`/clientes/${id}`, { method: "PATCH", body: datos });
 }
 
+/** GET /clientes/{id}/ordenes (HU06). Llega de la mas reciente a la mas antigua;
+ * total_comprado excluye las canceladas, numero_ordenes las incluye. */
+export type HistorialCliente = {
+  cliente: { id: number; nombre_completo: string };
+  numero_ordenes: number;
+  total_comprado: string;
+  ordenes: {
+    id: number;
+    codigo: string;
+    creado_en: string;
+    estado: EstadoOrden;
+    valor_total: string;
+    estado_pago: "Pendiente" | "Parcial" | "Pagada";
+  }[];
+};
+
+export async function getHistorialCliente(
+  id: number,
+  cookieStore: CookieStore,
+): Promise<HistorialCliente | null> {
+  return fetchBackend<HistorialCliente>(`/clientes/${id}/ordenes`, cookieStore);
+}
+
 /* ------------------------- Usuarios internos (HU03, HU04) ------------------------- */
 
 /** Forma prevista para /api/usuarios: agrega is_active, que el UserSerializer
