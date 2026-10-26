@@ -3346,3 +3346,28 @@ class DanosApiTests(EntregaEnMostradorMixin, APITestCase):
 
         self.assertEqual(self.client.get(f"{self.url_danos}?estado=pendiente").json(), [])
         self.assertEqual(len(self.client.get(f"{self.url_danos}?estado=pagado").json()), 1)
+
+
+class EntregaConMuchasFotosTests(CatalogoDePruebaMixin, APITestCase):
+    def test_cinco_prendas_con_novedad_y_foto_de_500_kb_caben_en_una_entrega(self):
+        self.crear_catalogo()
+        self.client.force_authenticate(self.recepcionista)
+        self.registrar(*(self.prenda(self.planchado) for _ in range(5)))
+        orden = Orden.objects.get()
+        self.client.post(f"/api/ordenes/{orden.pk}/pagos", {"monto": "30000", "metodo": "efectivo"}, format="json")
+        Orden.objects.filter(pk=orden.pk).update(estado=Orden.Estado.LISTA)
+        foto = data_url(JPEG[:4] + b"0" * (500 * 1024 - 4))
+
+        response = self.client.post(
+            f"/api/ordenes/{orden.pk}/entrega",
+            {
+                "prendas": [
+                    {"prenda": p.pk, "resultado": "novedad", "observacion": "Mancha", "foto": foto}
+                    for p in orden.prendas.all()
+                ]
+            },
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, 200, response.content[:200])
+        self.assertEqual(Novedad.objects.count(), 5)
