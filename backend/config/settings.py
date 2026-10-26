@@ -140,6 +140,10 @@ STORAGES = {
 }
 DEFAULT_AUTO_FIELD = "django.db.models.BigAutoField"
 
+# Cada prenda con novedad o dano en la entrega lleva una foto de hasta 500 KB
+# (unos 680 KB en base64); con los 2,5 MB por defecto no cabian mas de tres.
+DATA_UPLOAD_MAX_MEMORY_SIZE = 10 * 1024 * 1024
+
 PASSWORD_RESET_TIMEOUT = 60 * 60
 # Base de los enlaces que Django envia por correo (apuntan a paginas de Next.js).
 FRONTEND_URL = os.getenv("FRONTEND_URL", "http://localhost:3000").rstrip("/")

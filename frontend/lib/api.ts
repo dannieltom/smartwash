@@ -444,7 +444,8 @@ export type EstadoOrden =
   | "Lista para entrega"
   | "Entregada"
   | "Cancelada"
-  | "En espera";
+  | "En espera"
+  | "Con novedad";
 
 export type ServicioDePrenda = {
   id: number;
@@ -472,6 +473,8 @@ export type PrendaDeOrden = {
   color: string;
   estado_inicial: string;
   servicios: ServicioDePrenda[];
+  /** La lavanderia la dano o la perdio (HU19): ya no se cobra ni se vuelve a verificar. */
+  dano: TipoDano | null;
 };
 
 /** Lo que devuelve OrdenSerializer. Los montos llegan como texto decimal. */
@@ -486,6 +489,8 @@ export type Orden = {
   estado_pago: "Pendiente" | "Parcial" | "Pagada";
   subtotal: string;
   descuento: string;
+  descuento_novedad: string;
+  descuento_dano: string;
   valor_total: string;
   abono_requerido: string;
   duracion_estimada_dias: number;
@@ -497,6 +502,8 @@ export type Orden = {
   saldo_pendiente: string;
   tiene_abono: boolean;
   pago_completo: boolean;
+  /** Lo pagado de mas por los descuentos; se devuelve al entregar. */
+  saldo_a_favor: string;
 };
 
 /** Una linea de prenda tal como la recibe POST /ordenes y POST /ordenes/{id}/prendas. */
@@ -524,7 +531,14 @@ export type TipoEventoOrden =
   | "cambio_estado"
   | "prenda_agregada"
   | "servicio_agregado"
-  | "entrega";
+  | "entrega"
+  | "novedad"
+  | "decision_novedad"
+  | "notificacion"
+  | "cancelacion"
+  | "devolucion"
+  | "dano_prenda"
+  | "pago_dano";
 
 /** Lo que devuelve HistorialOrdenSerializer. `usuario` es null cuando el
  * evento lo genero el sistema; `usuario_nombre` ya trae "Sistema" en ese caso. */
@@ -605,13 +619,115 @@ export async function agregarServicioAPrenda(
   });
 }
 
-export type VerificacionPrenda = { prenda: number; coincide: boolean; observacion: string };
+export type TipoDano = "dano" | "perdida";
+export type ResultadoVerificacion = "coincide" | "novedad" | TipoDano;
 
-/** Entrega la orden verificando cada prenda (HU12). El backend exige que este
- * "Lista para entrega", que se verifiquen todas sus prendas una sola vez, la
- * observacion de cada discrepancia y el pago completo (HU24). */
+/** Novedad: observacion y foto. Dano: observacion, foto y valor de la prenda.
+ * Perdida: observacion y valor, sin foto (HU18 y HU19). */
+export type VerificacionPrenda = {
+  prenda: number;
+  resultado: ResultadoVerificacion;
+  observacion: string;
+  foto: string | null;
+  valor_declarado: string | null;
+};
+
+/** Entrega la orden verificando cada prenda que sigue en ella (HU12). El backend
+ * exige que este "Lista para entrega" y el pago completo del total ya descontado
+ * (HU24). Con alguna novedad la orden queda "Con novedad" en vez de entregarse. */
 export async function registrarEntrega(id: number, prendas: VerificacionPrenda[]): Promise<Response> {
   return api(`/ordenes/${id}/entrega`, { method: "POST", body: { prendas } });
+}
+
+/* ------------------------------- Novedades de una orden (HU18) ------------------------------- */
+
+/** Lo que devuelve NovedadSerializer. La foto no viene aqui: `foto_url` apunta
+ * a /api/novedades/{id}/foto, que responde la imagen y sirve directo en <img>. */
+export type Novedad = {
+  id: number;
+  orden: number;
+  prenda: number;
+  prenda_nombre: string;
+  descripcion: string;
+  origen: "proceso" | "entrega";
+  origen_nombre: string;
+  estado_anterior: EstadoOrden;
+  usuario_nombre: string | null;
+  creado_en: string;
+  foto_url: string | null;
+  decision: DecisionNovedad | null;
+  decision_observacion: string;
+  gravedad: Gravedad | "";
+  porcentaje_descuento: string | null;
+  monto_descuento: string;
+};
+
+/** Las del proceso: continuar, reprocesar o no_continuar. Las de la entrega:
+ * entregar_con_descuento o reprocesar_con_descuento (HU19). */
+export type DecisionNovedad =
+  | "continuar"
+  | "reprocesar"
+  | "no_continuar"
+  | "entregar_con_descuento"
+  | "reprocesar_con_descuento";
+
+export type Gravedad = "leve" | "moderada" | "notoria";
+
+export type DecisionFormulario = {
+  decision: DecisionNovedad;
+  observacion: string;
+  gravedades?: { novedad: number; gravedad: Gravedad }[];
+  operario?: number | null;
+};
+
+/** Una sola decision resuelve todas las novedades pendientes de la orden.
+ * "Entregar con descuento" tambien entrega la orden si el pago cubre el nuevo total. */
+export async function registrarDecision(id: number, datos: DecisionFormulario): Promise<Response> {
+  return api(`/ordenes/${id}/decision`, { method: "POST", body: datos });
+}
+
+/** Porcentajes de los descuentos por novedad. Cualquier sesion la lee; solo el
+ * administrador la cambia, y lo ya descontado conserva sus valores. */
+export type ConfiguracionDescuentos = {
+  porcentaje_leve: string;
+  porcentaje_moderada: string;
+  porcentaje_notoria: string;
+  porcentaje_reproceso: string;
+  monto_minimo: string;
+  tope_porcentaje: string;
+  actualizado_en: string;
+};
+
+export type CambioDescuentos = { fecha: string; usuario_nombre: string; detalle: string };
+
+export async function getConfiguracionDescuentos(
+  cookieStore: CookieStore,
+): Promise<ConfiguracionDescuentos | null> {
+  return fetchBackend<ConfiguracionDescuentos>("/ordenes/descuentos-novedad", cookieStore);
+}
+
+export async function getCambiosDescuentos(cookieStore: CookieStore): Promise<CambioDescuentos[] | null> {
+  return fetchBackend<CambioDescuentos[]>("/ordenes/descuentos-novedad/cambios", cookieStore);
+}
+
+export async function actualizarConfiguracionDescuentos(
+  datos: Omit<ConfiguracionDescuentos, "actualizado_en">,
+): Promise<Response> {
+  return api("/ordenes/descuentos-novedad", { method: "PATCH", body: datos });
+}
+
+export async function getNovedadesOrden(id: number, cookieStore: CookieStore): Promise<Novedad[] | null> {
+  return fetchBackend<Novedad[]>(`/ordenes/${id}/novedades`, cookieStore);
+}
+
+/** Novedad durante el proceso: solo el operario asignado o el administrador, con
+ * la orden "En proceso" o "Control de calidad". Descripcion y foto obligatorias;
+ * la foto es un data URL de 500 KB o menos. La orden queda "Con novedad". */
+export async function registrarNovedad(
+  id: number,
+  datos: { prenda: number; descripcion: string; foto: string },
+): Promise<Response> {
+  return api(`/ordenes/${id}/novedades`, { method: "POST", body: datos });
 }
 
 /** Avanza la orden por el flujo (HU14). El backend valida la transicion, el
@@ -631,6 +747,46 @@ export async function getOperarios(cookieStore: CookieStore): Promise<Operario[]
  * el operario este activo y que el estado de la orden lo permita. */
 export async function asignarOperario(id: number, operario: number): Promise<Response> {
   return api(`/ordenes/${id}/asignacion`, { method: "POST", body: { operario } });
+}
+
+/* ------------------------------- Danos y perdidas de prendas (HU19) ------------------------------- */
+
+/** `valor_declarado` es lo que la lavanderia le debe al cliente y no toca el
+ * total de la orden; `valor_servicio` es lo que se dejo de cobrar. */
+export type DanoPrenda = {
+  id: number;
+  orden: number;
+  orden_codigo: string;
+  cliente_nombre: string;
+  prenda: number;
+  prenda_nombre: string;
+  tipo: TipoDano;
+  tipo_nombre: string;
+  descripcion: string;
+  valor_declarado: string;
+  valor_servicio: string;
+  operario_nombre: string | null;
+  registrado_por_nombre: string | null;
+  creado_en: string;
+  estado: "pendiente" | "pagado";
+  estado_nombre: string;
+  pagado_por_nombre: string | null;
+  pagado_en: string | null;
+  observacion_pago: string;
+  foto_url: string | null;
+};
+
+/** Administrador y recepcionista; el operario recibe 403. */
+export async function getDanos(
+  cookieStore: CookieStore,
+  estado?: DanoPrenda["estado"],
+): Promise<DanoPrenda[] | null> {
+  return fetchBackend<DanoPrenda[]>(estado ? `/danos?estado=${estado}` : "/danos", cookieStore);
+}
+
+/** Solo el administrador; la observacion (por ejemplo, el medio de pago) es obligatoria. */
+export async function pagarDano(id: number, observacion: string): Promise<Response> {
+  return api(`/danos/${id}/pago`, { method: "POST", body: { observacion } });
 }
 
 /* ------------------------------- Pagos de una orden (HU21) ------------------------------- */

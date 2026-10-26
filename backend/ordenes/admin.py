@@ -89,6 +89,8 @@ class OrdenAdmin(HistorialEnAltasMixin, AutoriaAdminMixin):
         "estado_pago",
         "subtotal",
         "descuento",
+        "descuento_novedad",
+        "descuento_dano",
         "valor_total",
         "abono_requerido",
         "duracion_estimada_dias",

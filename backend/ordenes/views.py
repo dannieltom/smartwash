@@ -19,12 +19,18 @@ from core.permissions import (
     AdministradorORecepcionista,
     OperarioSoloSusOrdenes,
     RecepcionEscribe,
+    SoloAdministrador,
+    SoloAdministradorEscribe,
     SoloOperario,
 )
 
 from .avisos import avisar_orden_lista
 from .historial import operacion_sobre_orden, registrar_evento
 from .models import (
+    CambioConfiguracionDescuento,
+    ConfiguracionDescuentoNovedad,
+    DanoPrenda,
+    FotoDano,
     FotoNovedad,
     HistorialOrden,
     Novedad,
@@ -38,6 +44,8 @@ from .serializers import (
     CambioEstadoSerializer,
     CancelacionSerializer,
     ConsultaPublicaSerializer,
+    ConfiguracionDescuentoNovedadSerializer,
+    DanoPrendaSerializer,
     DecisionNovedadSerializer,
     EntregaSerializer,
     HistorialOrdenSerializer,
@@ -49,6 +57,7 @@ from .serializers import (
     OrdenConNovedadSerializer,
     OrdenHistorialClienteSerializer,
     OrdenSerializer,
+    PagoDanoSerializer,
     PrendaEntradaSerializer,
     agregar_prenda,
     agregar_servicio,
@@ -57,8 +66,10 @@ from .serializers import (
     guardar_recalculo,
     nombre_usuario,
     operarios_activos,
+    registrar_danos,
     registrar_decision,
     registrar_novedades,
+    sin_ceros,
 )
 
 Evento = HistorialOrden.TipoEvento
@@ -66,7 +77,10 @@ Evento = HistorialOrden.TipoEvento
 
 def ordenes_con_detalle():
     return Orden.objects.select_related("cliente").prefetch_related(
-        "prendas__tipo_prenda", "prendas__material", "prendas__servicios__tarifa__servicio"
+        "prendas__tipo_prenda",
+        "prendas__material",
+        "prendas__servicios__tarifa__servicio",
+        "prendas__dano",
     )
 
 
@@ -140,10 +154,14 @@ class BandejaOperarioView(generics.ListAPIView):
     )
 
     def get_queryset(self):
+        # Una prenda danada o perdida ya no se procesa aunque la orden vuelva a proceso.
+        por_procesar = Prenda.objects.filter(dano__isnull=True).select_related(
+            "tipo_prenda", "material"
+        ).prefetch_related("servicios__tarifa__servicio")
         return (
             Orden.objects.filter(operario=self.request.user)
             .exclude(estado__in=self.ESTADOS_FUERA_DE_BANDEJA)
-            .prefetch_related("prendas__tipo_prenda", "prendas__material", "prendas__servicios__tarifa__servicio")
+            .prefetch_related(Prefetch("prendas", por_procesar))
             .order_by("fecha_estimada_entrega", "creado_en")
         )
 
@@ -212,6 +230,32 @@ def reclasificar_cliente(cliente, usuario):
     return f". Cliente: {anterior} → {cliente.clasificacion}"
 
 
+def entregar_orden(orden, usuario, detalle):
+    """Cierra la orden y devuelve lo pagado de mas si los descuentos bajaron el total."""
+    saldo_a_favor = orden.saldo_a_favor()
+    anterior = orden.estado
+    # save() exige el pago completo (HU24) e indica el saldo si falta.
+    orden.estado = Orden.Estado.ENTREGADA
+    orden.fecha_entrega = timezone.now()
+    orden.registrar_autoria(usuario)
+    orden.save()
+    registrar_evento(
+        orden,
+        Evento.ENTREGA,
+        usuario,
+        f"{anterior} → Entregada. {detalle}" + reclasificar_cliente(orden.cliente, usuario),
+    )
+    if saldo_a_favor > 0:
+        # Los pagos no se tocan: la devolucion queda solo en el historial, como en HU13.
+        registrar_evento(
+            orden,
+            Evento.DEVOLUCION,
+            usuario,
+            f"${saldo_a_favor} devueltos al cliente: lo pagado supera el total con "
+            f"descuentos (${orden.valor_total})",
+        )
+
+
 class RegistrarEntregaView(APIView):
     permission_classes = [AdministradorORecepcionista]
 
@@ -224,23 +268,19 @@ class RegistrarEntregaView(APIView):
                 raise serializers.ValidationError(
                     {"estado": f'La orden esta "{orden.estado}"; solo se entrega desde "Lista para entrega".'}
                 )
-            no_coinciden = entrada.verificar_contra(orden)
-            if no_coinciden:
-                registrar_novedades(orden, no_coinciden, Novedad.Origen.ENTREGA, request.user)
+            novedades, danos = entrada.verificar_contra(orden)
+            if danos:
+                registrar_danos(orden, danos, request.user)
+            if novedades:
+                registrar_novedades(orden, novedades, Novedad.Origen.ENTREGA, request.user)
             else:
-                # save() exige el pago completo (HU24) e indica el saldo si falta.
-                orden.estado = Orden.Estado.ENTREGADA
-                orden.fecha_entrega = timezone.now()
-                orden.registrar_autoria(request.user)
-                orden.save()
-                registrar_evento(
-                    orden,
-                    Evento.ENTREGA,
-                    request.user,
-                    f"Lista para entrega → Entregada. {orden.prendas.count()} prendas "
-                    "verificadas, todas coinciden con lo solicitado"
-                    + reclasificar_cliente(orden.cliente, request.user),
+                verificadas = len(entrada.validated_data["prendas"])
+                detalle = (
+                    f"{verificadas} prendas verificadas, {len(danos)} con daño o pérdida"
+                    if danos
+                    else f"{verificadas} prendas verificadas, todas coinciden con lo solicitado"
                 )
+                entregar_orden(orden, request.user, detalle)
         return Response(OrdenSerializer(ordenes_con_detalle().get(pk=orden.pk)).data)
 
 
@@ -437,12 +477,122 @@ class DecisionNovedadView(APIView):
     def post(self, request, pk):
         entrada = DecisionNovedadSerializer(data=request.data)
         entrada.is_valid(raise_exception=True)
+        datos = entrada.validated_data
         with operacion_sobre_orden():
             orden = get_object_or_404(Orden.objects.select_for_update(), pk=pk)
-            registrar_decision(
-                orden,
-                entrada.validated_data["decision"],
-                entrada.validated_data["observacion"],
-                request.user,
-            )
+            registrar_decision(orden, datos, request.user)
+            if datos["decision"] == Novedad.Decision.ENTREGAR_CON_DESCUENTO:
+                entregar_orden(
+                    orden, request.user, "El cliente acepta las prendas con novedad con descuento"
+                )
         return Response(OrdenSerializer(ordenes_con_detalle().get(pk=orden.pk)).data)
+
+
+ETIQUETAS_CONFIGURACION = {
+    "porcentaje_leve": ("Leve", " %"),
+    "porcentaje_moderada": ("Moderada", " %"),
+    "porcentaje_notoria": ("Notoria", " %"),
+    "porcentaje_reproceso": ("Reproceso", " %"),
+    "monto_minimo": ("Monto minimo", ""),
+    "tope_porcentaje": ("Tope", " %"),
+}
+
+
+class DescuentosNovedadView(APIView):
+    permission_classes = [SoloAdministradorEscribe]
+
+    def get(self, request):
+        configuracion = ConfiguracionDescuentoNovedad.actual()
+        return Response(ConfiguracionDescuentoNovedadSerializer(configuracion).data)
+
+    def patch(self, request):
+        with transaction.atomic():
+            configuracion = ConfiguracionDescuentoNovedad.objects.select_for_update().get(
+                pk=ConfiguracionDescuentoNovedad.actual().pk
+            )
+            entrada = ConfiguracionDescuentoNovedadSerializer(
+                configuracion, data=request.data, partial=True
+            )
+            entrada.is_valid(raise_exception=True)
+            cambios = []
+            for campo, (etiqueta, unidad) in ETIQUETAS_CONFIGURACION.items():
+                anterior, nuevo = getattr(configuracion, campo), entrada.validated_data.get(campo)
+                if nuevo is not None and nuevo != anterior:
+                    cambios.append(
+                        f"{etiqueta}: {sin_ceros(anterior)}{unidad} → {sin_ceros(nuevo)}{unidad}"
+                    )
+            configuracion.registrar_autoria(request.user)
+            entrada.save()
+            if cambios:
+                CambioConfiguracionDescuento.objects.create(
+                    usuario=request.user, detalle="; ".join(cambios)
+                )
+        return Response(ConfiguracionDescuentoNovedadSerializer(configuracion).data)
+
+
+class CambiosDescuentosNovedadView(APIView):
+    permission_classes = [SoloAdministrador]
+
+    def get(self, request):
+        cambios = CambioConfiguracionDescuento.objects.select_related("usuario")
+        return Response(
+            [
+                {"fecha": c.fecha, "usuario_nombre": nombre_usuario(c.usuario), "detalle": c.detalle}
+                for c in cambios
+            ]
+        )
+
+
+class DanosView(generics.ListAPIView):
+    serializer_class = DanoPrendaSerializer
+    permission_classes = [AdministradorORecepcionista]
+
+    def get_queryset(self):
+        danos = DanoPrenda.objects.select_related(
+            "orden__cliente",
+            "prenda__tipo_prenda",
+            "prenda__material",
+            "operario",
+            "creado_por",
+            "pagado_por",
+            "foto",
+        )
+        estado = self.request.query_params.get("estado")
+        if estado in DanoPrenda.Estado.values:
+            danos = danos.filter(estado=estado)
+        # Lo pendiente de pago primero: es lo que hay que atender.
+        return danos.order_by("-estado", "-creado_en", "-id")
+
+
+class PagoDanoView(APIView):
+    permission_classes = [SoloAdministrador]
+
+    def post(self, request, pk):
+        entrada = PagoDanoSerializer(data=request.data)
+        entrada.is_valid(raise_exception=True)
+        with operacion_sobre_orden():
+            dano = get_object_or_404(DanoPrenda.objects.select_for_update(), pk=pk)
+            if dano.estado == DanoPrenda.Estado.PAGADO:
+                raise serializers.ValidationError({"estado": "Este caso ya esta pagado."})
+            dano.estado = DanoPrenda.Estado.PAGADO
+            dano.pagado_por = request.user
+            dano.pagado_en = timezone.now()
+            dano.observacion_pago = entrada.validated_data["observacion"]
+            dano.registrar_autoria(request.user)
+            dano.save()
+            registrar_evento(
+                dano.orden,
+                Evento.PAGO_DANO,
+                request.user,
+                f"${dano.valor_declarado} pagados al cliente por {dano.get_tipo_display().lower()} "
+                f"de {dano.prenda}. {dano.observacion_pago}",
+            )
+        return Response(DanoPrendaSerializer(dano).data)
+
+
+class FotoDanoView(APIView):
+    permission_classes = [AdministradorORecepcionista]
+
+    def get(self, request, pk):
+        foto = get_object_or_404(FotoDano, dano=pk)
+        return HttpResponse(base64.b64decode(foto.contenido), content_type=foto.tipo)
