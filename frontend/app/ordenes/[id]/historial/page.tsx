@@ -21,6 +21,8 @@ const COLOR_EVENTO: Record<TipoEventoOrden, "blue" | "mint" | "lavender" | "peac
   notificacion: "mint",
   cancelacion: "peach",
   devolucion: "peach",
+  dano_prenda: "peach",
+  pago_dano: "mint",
 };
 
 function Mensaje({ children }: { children: string }) {

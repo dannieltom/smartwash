@@ -4,6 +4,7 @@ import { redirect } from "next/navigation";
 import type { ReactNode } from "react";
 
 import {
+  getConfiguracionDescuentos,
   getCurrentUser,
   getHistorialOrden,
   getMateriales,
@@ -15,6 +16,7 @@ import {
   getTarifas,
   getTiposPrenda,
   type EstadoOrden,
+  type TipoDano,
 } from "@/lib/api";
 import { formatCOP, formatFecha } from "@/lib/format";
 import { ClayBadge, ClayCard, Encabezado } from "../../components/ui/clay";
@@ -27,12 +29,14 @@ import AgregarServicio from "./agregar-servicio";
 import AsignarOperario from "./asignar-operario";
 import AvisoCliente from "./aviso-cliente";
 import CambiarEstado from "./cambiar-estado";
+import DecisionEntrega from "./decision-entrega";
 import NovedadesOrden from "./novedades-orden";
 import PagosOrden from "./pagos-orden";
 import RegistrarEntrega from "./registrar-entrega";
 import RegistrarNovedad from "./registrar-novedad";
 
 const ESTADOS_QUE_ADMITEN_LINEAS: EstadoOrden[] = ["En espera", "Recibida", "Clasificada"];
+const DANO: Record<TipoDano, string> = { dano: "Dañada por la lavanderia", perdida: "Perdida" };
 
 function Dato({ etiqueta, children }: { etiqueta: string; children: ReactNode }) {
   return (
@@ -58,7 +62,7 @@ export default async function OrdenPage({
   const { registrada } = await searchParams;
   const puedeEditar = user.rol !== "operario";
 
-  const [orden, tiposPrenda, materiales, servicios, tarifas, pagos, operarios, novedades, historial] = await Promise.all([
+  const [orden, tiposPrenda, materiales, servicios, tarifas, pagos, operarios, novedades, historial, configuracion] = await Promise.all([
     getOrden(id, cookieStore),
     puedeEditar ? getTiposPrenda(cookieStore) : null,
     puedeEditar ? getMateriales(cookieStore) : null,
@@ -68,6 +72,7 @@ export default async function OrdenPage({
     puedeEditar ? getOperarios(cookieStore) : null,
     getNovedadesOrden(id, cookieStore),
     puedeEditar ? getHistorialOrden(id, cookieStore) : null,
+    puedeEditar ? getConfiguracionDescuentos(cookieStore) : null,
   ]);
 
   if (orden === null) {
@@ -127,6 +132,9 @@ export default async function OrdenPage({
       {historial && <AvisoCliente orden={orden} historial={historial} />}
       {puedeEditar && orden.estado === "Lista para entrega" && <RegistrarEntrega orden={orden} />}
       <CambiarEstado orden={orden} usuario={user} />
+      {puedeEditar && orden.estado === "Con novedad" && novedades && configuracion && (
+        <DecisionEntrega orden={orden} novedades={novedades} operarios={operarios} configuracion={configuracion} />
+      )}
       <RegistrarNovedad orden={orden} usuario={user} />
       {novedades && <NovedadesOrden novedades={novedades} />}
       {puedeEditar && <AsignarOperario orden={orden} operarios={operarios} usuario={user} />}
@@ -137,6 +145,12 @@ export default async function OrdenPage({
           <Dato etiqueta="Descuento fidelizacion">
             {Number(orden.descuento) > 0 ? `− ${formatCOP(orden.descuento)}` : formatCOP(0)}
           </Dato>
+          {Number(orden.descuento_novedad) > 0 && (
+            <Dato etiqueta="Descuento por novedad">− {formatCOP(orden.descuento_novedad)}</Dato>
+          )}
+          {Number(orden.descuento_dano) > 0 && (
+            <Dato etiqueta="Servicios dañados o perdidos">− {formatCOP(orden.descuento_dano)}</Dato>
+          )}
           <Dato etiqueta="Valor total">{formatCOP(orden.valor_total)}</Dato>
           <Dato etiqueta="Abono requerido (30 %)">
             <span className="block">{formatCOP(orden.abono_requerido)}</span>
@@ -146,6 +160,9 @@ export default async function OrdenPage({
           </Dato>
           <Dato etiqueta="Pagado">{formatCOP(orden.total_pagado)}</Dato>
           <Dato etiqueta="Saldo pendiente">{formatCOP(orden.saldo_pendiente)}</Dato>
+          {Number(orden.saldo_a_favor) > 0 && (
+            <Dato etiqueta="Saldo a favor del cliente">{formatCOP(orden.saldo_a_favor)}</Dato>
+          )}
           <Dato etiqueta="Duracion estimada">
             {orden.duracion_estimada_dias} {orden.duracion_estimada_dias === 1 ? "dia habil" : "dias habiles"}
           </Dato>
@@ -170,14 +187,15 @@ export default async function OrdenPage({
       <h2 className="mb-3 text-lg font-bold text-(--sw-ink)">Prendas</h2>
       <div className="flex flex-col gap-3">
         {agruparPrendas(orden.detalle_prendas, (p) =>
-          p.servicios.map((x) => `${x.servicio}:${Number(x.valor_aplicado)}`).sort().join(","),
+          [p.dano ?? "", ...p.servicios.map((x) => `${x.servicio}:${Number(x.valor_aplicado)}`).sort()].join(","),
         ).map((grupo) => {
           const [prenda] = grupo.prendas;
           const detalles = detallesDe(grupo);
           return (
             <ClayCard key={prenda.id} className="p-4">
-              <p className="font-semibold text-(--sw-ink)">
+              <p className="flex flex-wrap items-center gap-2 font-semibold text-(--sw-ink)">
                 {grupo.cantidad} × {prenda.tipo_prenda_nombre}
+                {prenda.dano && <ClayBadge color="peach">{DANO[prenda.dano]} · no se cobra</ClayBadge>}
               </p>
               {detalles.length > 0 && (
                 <p className="mt-0.5 text-xs text-(--sw-ink-soft)">{detalles.join(" · ")}</p>
