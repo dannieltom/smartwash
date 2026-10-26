@@ -14,6 +14,7 @@ export const COLOR_ESTADO: Record<Orden["estado"], "blue" | "mint" | "lavender" 
   Entregada: "mint",
   Cancelada: "peach",
   "En espera": "peach",
+  "Con novedad": "peach",
 };
 
 export default function TablaOrdenes({ ordenes }: { ordenes: Orden[] }) {

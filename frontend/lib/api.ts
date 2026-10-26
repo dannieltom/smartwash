@@ -444,7 +444,8 @@ export type EstadoOrden =
   | "Lista para entrega"
   | "Entregada"
   | "Cancelada"
-  | "En espera";
+  | "En espera"
+  | "Con novedad";
 
 export type ServicioDePrenda = {
   id: number;
@@ -605,13 +606,53 @@ export async function agregarServicioAPrenda(
   });
 }
 
-export type VerificacionPrenda = { prenda: number; coincide: boolean; observacion: string };
+/** `foto` solo aplica a una prenda que no coincide; es opcional en la entrega (HU18). */
+export type VerificacionPrenda = {
+  prenda: number;
+  coincide: boolean;
+  observacion: string;
+  foto?: string | null;
+};
 
 /** Entrega la orden verificando cada prenda (HU12). El backend exige que este
  * "Lista para entrega", que se verifiquen todas sus prendas una sola vez, la
  * observacion de cada discrepancia y el pago completo (HU24). */
 export async function registrarEntrega(id: number, prendas: VerificacionPrenda[]): Promise<Response> {
   return api(`/ordenes/${id}/entrega`, { method: "POST", body: { prendas } });
+}
+
+/* ------------------------------- Novedades de una orden (HU18) ------------------------------- */
+
+/** Lo que devuelve NovedadSerializer. La foto no viene aqui: `foto_url` apunta
+ * a /api/novedades/{id}/foto, que responde la imagen y sirve directo en <img>. */
+export type Novedad = {
+  id: number;
+  orden: number;
+  prenda: number;
+  prenda_nombre: string;
+  descripcion: string;
+  origen: "proceso" | "entrega";
+  origen_nombre: string;
+  estado_anterior: EstadoOrden;
+  usuario_nombre: string | null;
+  creado_en: string;
+  foto_url: string | null;
+  decision: "continuar" | "reprocesar" | "no_continuar" | null;
+  decision_observacion: string;
+};
+
+export async function getNovedadesOrden(id: number, cookieStore: CookieStore): Promise<Novedad[] | null> {
+  return fetchBackend<Novedad[]>(`/ordenes/${id}/novedades`, cookieStore);
+}
+
+/** Novedad durante el proceso: solo el operario asignado o el administrador, con
+ * la orden "En proceso" o "Control de calidad". Descripcion y foto obligatorias;
+ * la foto es un data URL de 500 KB o menos. La orden queda "Con novedad". */
+export async function registrarNovedad(
+  id: number,
+  datos: { prenda: number; descripcion: string; foto: string },
+): Promise<Response> {
+  return api(`/ordenes/${id}/novedades`, { method: "POST", body: datos });
 }
 
 /** Avanza la orden por el flujo (HU14). El backend valida la transicion, el
