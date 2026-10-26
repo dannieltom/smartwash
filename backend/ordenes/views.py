@@ -8,8 +8,8 @@ from django.http import HttpResponse
 from django.shortcuts import get_object_or_404
 from django.utils import timezone
 from rest_framework import generics, serializers, status
-from rest_framework.permissions import IsAuthenticated
-from rest_framework.exceptions import PermissionDenied
+from rest_framework.permissions import AllowAny, IsAuthenticated
+from rest_framework.exceptions import NotFound, PermissionDenied
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
@@ -43,6 +43,7 @@ from .serializers import (
     AsignacionSerializer,
     CambioEstadoSerializer,
     CancelacionSerializer,
+    ConsultaPublicaSerializer,
     ConfiguracionDescuentoNovedadSerializer,
     DanoPrendaSerializer,
     DecisionNovedadSerializer,
@@ -122,6 +123,16 @@ class AlertasVencimientoView(generics.ListAPIView):
             ordenes = ordenes.filter(operario=self.request.user)
         # La fecha mas antigua primero: las mas retrasadas encabezan la lista.
         return ordenes.select_related("cliente").order_by("fecha_estimada_entrega", "creado_en")
+
+
+class ConsultaPublicaView(APIView):
+    permission_classes = [AllowAny]
+
+    def get(self, request, codigo):
+        orden = Orden.objects.filter(codigo=codigo).first()
+        if orden is None:
+            raise NotFound("No encontramos una orden con ese codigo. Revisa el comprobante.")
+        return Response(ConsultaPublicaSerializer(orden).data)
 
 
 class OrdenDetailView(generics.RetrieveAPIView):
