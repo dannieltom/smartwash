@@ -625,7 +625,7 @@ class CambioConfiguracionDescuento(models.Model):
 
 
 class DanoPrenda(ModeloConAutoria):
-    """Prenda que la lavanderia dano o perdio (HU35).
+    """Prenda que la lavanderia dano o perdio (HU19).
 
     valor_servicio es lo que se deja de cobrar en la orden; valor_declarado es
     lo que la lavanderia le debe al cliente por la prenda, y no toca el total.

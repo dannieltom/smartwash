@@ -658,7 +658,7 @@ class ResultadoVerificacion(models.TextChoices):
 class VerificacionPrendaSerializer(serializers.Serializer):
     prenda = serializers.IntegerField()
     resultado = serializers.ChoiceField(choices=ResultadoVerificacion.choices, required=False)
-    # Forma anterior a HU35, que aun envia el frontend: coincide=false es una novedad.
+    # Forma anterior a dano y perdida, que aun envia el frontend: coincide=false es una novedad.
     coincide = serializers.BooleanField(required=False)
     observacion = serializers.CharField(required=False, allow_blank=True, default="")
     foto = FotoField(required=False, allow_null=True, default=None)
