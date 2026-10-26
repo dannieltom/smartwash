@@ -5,6 +5,7 @@ import { redirect } from "next/navigation";
 import { getCurrentUser, getHistorialOrden, getOrden, type TipoEventoOrden } from "@/lib/api";
 import { FECHA_LEGIBLE } from "@/lib/auditoria";
 import { ClayBadge, ClayCard, Encabezado } from "../../../components/ui/clay";
+import { hayQueLlamar } from "../../avisos";
 
 const COLOR_EVENTO: Record<TipoEventoOrden, "blue" | "mint" | "lavender" | "peach"> = {
   creacion: "blue",
@@ -15,6 +16,11 @@ const COLOR_EVENTO: Record<TipoEventoOrden, "blue" | "mint" | "lavender" | "peac
   prenda_agregada: "peach",
   servicio_agregado: "peach",
   entrega: "mint",
+  novedad: "peach",
+  decision_novedad: "lavender",
+  notificacion: "mint",
+  cancelacion: "peach",
+  devolucion: "peach",
 };
 
 function Mensaje({ children }: { children: string }) {
@@ -64,18 +70,34 @@ export default async function HistorialOrdenPage({ params }: { params: Promise<{
               </tr>
             </thead>
             <tbody>
-              {historial.map((evento) => (
-                <tr key={evento.id} className="border-t border-(--sw-hairline)">
-                  <td data-label="Fecha" className="px-5 py-3 whitespace-nowrap text-(--sw-ink-soft)">
-                    {FECHA_LEGIBLE.format(new Date(evento.fecha))}
-                  </td>
-                  <td data-label="Evento" className="px-5 py-3">
-                    <ClayBadge color={COLOR_EVENTO[evento.tipo_evento]}>{evento.tipo_evento_nombre}</ClayBadge>
-                  </td>
-                  <td data-label="Usuario" className="px-5 py-3 text-(--sw-ink)">{evento.usuario_nombre}</td>
-                  <td data-label="Detalle" className="px-5 py-3 text-(--sw-ink-soft)">{evento.detalle}</td>
-                </tr>
-              ))}
+              {historial.map((evento) => {
+                const llamar = hayQueLlamar(evento);
+                return (
+                  <tr
+                    key={evento.id}
+                    className={`border-t border-(--sw-hairline) ${llamar ? "bg-(--sw-peach)/25" : ""}`}
+                  >
+                    <td data-label="Fecha" className="px-5 py-3 whitespace-nowrap text-(--sw-ink-soft)">
+                      {FECHA_LEGIBLE.format(new Date(evento.fecha))}
+                    </td>
+                    <td data-label="Evento" className="px-5 py-3">
+                      <ClayBadge color={llamar ? "peach" : (COLOR_EVENTO[evento.tipo_evento] ?? "blue")}>
+                        {evento.tipo_evento_nombre}
+                      </ClayBadge>
+                    </td>
+                    <td data-label="Usuario" className="px-5 py-3 text-(--sw-ink)">{evento.usuario_nombre}</td>
+                    <td data-label="Detalle" className="px-5 py-3 text-(--sw-ink-soft)">
+                      {llamar ? (
+                        <>
+                          <span className="font-semibold text-(--sw-ink)">Llamar al cliente.</span> {evento.detalle}
+                        </>
+                      ) : (
+                        evento.detalle
+                      )}
+                    </td>
+                  </tr>
+                );
+              })}
             </tbody>
           </table>
         </ClayCard>

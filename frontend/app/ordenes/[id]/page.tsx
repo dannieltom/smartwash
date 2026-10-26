@@ -5,6 +5,7 @@ import type { ReactNode } from "react";
 
 import {
   getCurrentUser,
+  getHistorialOrden,
   getMateriales,
   getNovedadesOrden,
   getOperarios,
@@ -24,6 +25,7 @@ import { agruparPrendas, detallesDe } from "../agrupar";
 import AgregarPrenda from "./agregar-prenda";
 import AgregarServicio from "./agregar-servicio";
 import AsignarOperario from "./asignar-operario";
+import AvisoCliente from "./aviso-cliente";
 import CambiarEstado from "./cambiar-estado";
 import NovedadesOrden from "./novedades-orden";
 import PagosOrden from "./pagos-orden";
@@ -56,7 +58,7 @@ export default async function OrdenPage({
   const { registrada } = await searchParams;
   const puedeEditar = user.rol !== "operario";
 
-  const [orden, tiposPrenda, materiales, servicios, tarifas, pagos, operarios, novedades] = await Promise.all([
+  const [orden, tiposPrenda, materiales, servicios, tarifas, pagos, operarios, novedades, historial] = await Promise.all([
     getOrden(id, cookieStore),
     puedeEditar ? getTiposPrenda(cookieStore) : null,
     puedeEditar ? getMateriales(cookieStore) : null,
@@ -65,6 +67,7 @@ export default async function OrdenPage({
     puedeEditar ? getPagosOrden(id, cookieStore) : null,
     puedeEditar ? getOperarios(cookieStore) : null,
     getNovedadesOrden(id, cookieStore),
+    puedeEditar ? getHistorialOrden(id, cookieStore) : null,
   ]);
 
   if (orden === null) {
@@ -121,6 +124,7 @@ export default async function OrdenPage({
         </div>
       )}
 
+      {historial && <AvisoCliente orden={orden} historial={historial} />}
       {puedeEditar && orden.estado === "Lista para entrega" && <RegistrarEntrega orden={orden} />}
       <CambiarEstado orden={orden} usuario={user} />
       <RegistrarNovedad orden={orden} usuario={user} />

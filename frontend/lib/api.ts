@@ -525,7 +525,12 @@ export type TipoEventoOrden =
   | "cambio_estado"
   | "prenda_agregada"
   | "servicio_agregado"
-  | "entrega";
+  | "entrega"
+  | "novedad"
+  | "decision_novedad"
+  | "notificacion"
+  | "cancelacion"
+  | "devolucion";
 
 /** Lo que devuelve HistorialOrdenSerializer. `usuario` es null cuando el
  * evento lo genero el sistema; `usuario_nombre` ya trae "Sistema" en ese caso. */
