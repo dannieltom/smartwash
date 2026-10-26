@@ -1,11 +1,14 @@
 import type { Novedad } from "@/lib/api";
 import { FECHA_LEGIBLE } from "@/lib/auditoria";
+import { formatCOP } from "@/lib/format";
 import { ClayBadge, ClayCard } from "../../components/ui/clay";
 
 const DECISION: Record<NonNullable<Novedad["decision"]>, string> = {
   continuar: "Continuar igual",
   reprocesar: "Reprocesar",
   no_continuar: "No continuar",
+  entregar_con_descuento: "Entregar con descuento",
+  reprocesar_con_descuento: "Reprocesar con descuento",
 };
 
 export default function NovedadesOrden({ novedades }: { novedades: Novedad[] }) {
@@ -40,7 +43,11 @@ export default function NovedadesOrden({ novedades }: { novedades: Novedad[] }) 
               </p>
               <div className="mt-2">
                 {n.decision ? (
-                  <ClayBadge color="mint">Decision del cliente: {DECISION[n.decision]}</ClayBadge>
+                  <ClayBadge color="mint">
+                    Decision del cliente: {DECISION[n.decision]}
+                    {Number(n.monto_descuento) > 0 &&
+                      ` · ${n.gravedad ? `${n.gravedad} ` : ""}${Number(n.porcentaje_descuento)} % (− ${formatCOP(n.monto_descuento)})`}
+                  </ClayBadge>
                 ) : (
                   <ClayBadge color="peach">Pendiente de decision del cliente</ClayBadge>
                 )}

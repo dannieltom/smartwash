@@ -4,50 +4,71 @@ import { useRouter } from "next/navigation";
 import { useState, type FormEvent } from "react";
 
 import { AlertaErrores } from "@/app/catalogo/errores";
-import { registrarEntrega, type Orden } from "@/lib/api";
+import { registrarEntrega, type Orden, type ResultadoVerificacion } from "@/lib/api";
 import { formatCOP } from "@/lib/format";
-import { ClayButton, ClayCard, ClayTextarea } from "../../components/ui/clay";
+import { ClayButton, ClayCard, ClayInput, ClayTextarea } from "../../components/ui/clay";
 import CampoFoto from "../campo-foto";
+import { valorDePrenda } from "../descuentos";
 import { mensajesDeOrden } from "../errores";
 import type { FotoLista } from "../foto";
 
 // null mientras la recepcionista no ha revisado la prenda: no se asume que coincide.
-type Revision = { coincide: boolean | null; observacion: string; foto: FotoLista | null };
+type Revision = {
+  resultado: ResultadoVerificacion | null;
+  observacion: string;
+  foto: FotoLista | null;
+  valor: string;
+};
 
-// El backend limita el cuerpo de la peticion a 2,5 MB: mas de 3 fotos de 500 KB
-// en base64 lo superarian.
-const MAXIMO_FOTOS = 3;
+const OPCIONES: { valor: ResultadoVerificacion; etiqueta: string }[] = [
+  { valor: "coincide", etiqueta: "Coincide con lo solicitado" },
+  { valor: "novedad", etiqueta: "Novedad (defecto menor)" },
+  { valor: "dano", etiqueta: "Daño de la lavanderia" },
+  { valor: "perdida", etiqueta: "Perdida" },
+];
 
-function revisionesVacias(orden: Orden): Record<number, Revision> {
-  return Object.fromEntries(orden.detalle_prendas.map((p) => [p.id, { coincide: null, observacion: "", foto: null }]));
+const PIDE_FOTO: ResultadoVerificacion[] = ["novedad", "dano"];
+const PIDE_VALOR: ResultadoVerificacion[] = ["dano", "perdida"];
+
+const vacia = (): Revision => ({ resultado: null, observacion: "", foto: null, valor: "" });
+
+function estaCompleta(r: Revision) {
+  if (r.resultado === null) return false;
+  if (r.resultado === "coincide") return true;
+  return (
+    r.observacion.trim() !== "" &&
+    (!PIDE_FOTO.includes(r.resultado) || r.foto !== null) &&
+    (!PIDE_VALOR.includes(r.resultado) || Number(r.valor) > 0)
+  );
 }
 
 export default function RegistrarEntrega({ orden }: { orden: Orden }) {
   const router = useRouter();
+  // Las danadas o perdidas en una entrega anterior ya quedaron resueltas.
+  const prendas = orden.detalle_prendas.filter((p) => p.dano === null);
+  const revisionesVacias = () => Object.fromEntries(prendas.map((p) => [p.id, vacia()]));
   const [abierto, setAbierto] = useState(false);
-  const [revisiones, setRevisiones] = useState(() => revisionesVacias(orden));
+  const [revisiones, setRevisiones] = useState<Record<number, Revision>>(revisionesVacias);
   const [errores, setErrores] = useState<string[]>([]);
   const [pending, setPending] = useState(false);
 
-  const completa = orden.detalle_prendas.every((p) => {
-    const r = revisiones[p.id];
-    return r.coincide === true || (r.coincide === false && r.observacion.trim() !== "");
-  });
-
-  const fotos = Object.values(revisiones).filter((r) => r.coincide === false && r.foto).length;
-  const hayDiscrepancias = Object.values(revisiones).some((r) => r.coincide === false);
+  const completa = prendas.every((p) => estaCompleta(revisiones[p.id]));
+  const hayNovedades = prendas.some((p) => revisiones[p.id].resultado === "novedad");
+  const sinCobrar = prendas
+    .filter((p) => PIDE_VALOR.includes(revisiones[p.id].resultado ?? "coincide"))
+    .reduce((suma, p) => suma + valorDePrenda(p), 0);
 
   function revisar(prenda: number, cambios: Partial<Revision>) {
     setRevisiones((actual) => ({ ...actual, [prenda]: { ...actual[prenda], ...cambios } }));
   }
 
   function marcarTodas() {
-    setRevisiones(Object.fromEntries(orden.detalle_prendas.map((p) => [p.id, { coincide: true, observacion: "", foto: null }])));
+    setRevisiones(Object.fromEntries(prendas.map((p) => [p.id, { ...vacia(), resultado: "coincide" }])));
   }
 
   function cancelar() {
     setAbierto(false);
-    setRevisiones(revisionesVacias(orden));
+    setRevisiones(revisionesVacias());
     setErrores([]);
   }
 
@@ -55,13 +76,18 @@ export default function RegistrarEntrega({ orden }: { orden: Orden }) {
     event.preventDefault();
     setPending(true);
     setErrores([]);
-    const prendas = orden.detalle_prendas.map((p) => ({
-      prenda: p.id,
-      coincide: revisiones[p.id].coincide === true,
-      observacion: revisiones[p.id].observacion.trim(),
-      foto: revisiones[p.id].coincide === false ? (revisiones[p.id].foto?.dataUrl ?? null) : null,
-    }));
-    const response = await registrarEntrega(orden.id, prendas).catch(() => null);
+    const verificaciones = prendas.map((p) => {
+      const r = revisiones[p.id];
+      const resultado = r.resultado ?? "coincide";
+      return {
+        prenda: p.id,
+        resultado,
+        observacion: resultado === "coincide" ? "" : r.observacion.trim(),
+        foto: PIDE_FOTO.includes(resultado) ? (r.foto?.dataUrl ?? null) : null,
+        valor_declarado: PIDE_VALOR.includes(resultado) ? r.valor : null,
+      };
+    });
+    const response = await registrarEntrega(orden.id, verificaciones).catch(() => null);
     setPending(false);
 
     if (response?.ok) {
@@ -113,8 +139,9 @@ export default function RegistrarEntrega({ orden }: { orden: Orden }) {
             Marcar todas como coincide
           </ClayButton>
         </div>
-        {orden.detalle_prendas.map((prenda, indice) => {
+        {prendas.map((prenda, indice) => {
           const revision = revisiones[prenda.id];
+          const resultado = revision.resultado;
           const nombre = `prenda-${prenda.id}`;
           return (
             <fieldset key={prenda.id} className="clay-sm flex flex-col gap-2 p-4">
@@ -130,63 +157,85 @@ export default function RegistrarEntrega({ orden }: { orden: Orden }) {
               {prenda.estado_inicial && (
                 <p className="text-xs text-(--sw-ink-soft)">Al recibir: {prenda.estado_inicial}</p>
               )}
-              <div className="flex flex-wrap gap-4 text-sm text-(--sw-ink)">
-                <label className="flex items-center gap-2">
-                  <input
-                    type="radio"
-                    name={nombre}
-                    checked={revision.coincide === true}
-                    onChange={() => revisar(prenda.id, { coincide: true, observacion: "", foto: null })}
-                    required
-                  />
-                  Coincide con lo solicitado
-                </label>
-                <label className="flex items-center gap-2">
-                  <input
-                    type="radio"
-                    name={nombre}
-                    checked={revision.coincide === false}
-                    onChange={() => revisar(prenda.id, { coincide: false })}
-                  />
-                  No coincide
-                </label>
+              <div className="flex flex-wrap gap-x-4 gap-y-2 text-sm text-(--sw-ink)">
+                {OPCIONES.map((opcion, i) => (
+                  <label key={opcion.valor} className="flex items-center gap-2">
+                    <input
+                      type="radio"
+                      name={nombre}
+                      checked={resultado === opcion.valor}
+                      onChange={() =>
+                        revisar(prenda.id, opcion.valor === "coincide" ? vacia() : { resultado: opcion.valor })
+                      }
+                      required={i === 0}
+                    />
+                    {opcion.etiqueta}
+                  </label>
+                ))}
               </div>
-              {revision.coincide === false && (
+              {resultado !== null && resultado !== "coincide" && (
                 <ClayTextarea
                   aria-label={`Observacion de la prenda ${indice + 1}`}
-                  placeholder="Describe la discrepancia (obligatorio)"
+                  placeholder={
+                    resultado === "perdida"
+                      ? "Describe que paso con la prenda (obligatorio)"
+                      : "Describe lo que encontraste (obligatorio)"
+                  }
                   value={revision.observacion}
                   onChange={(e) => revisar(prenda.id, { observacion: e.target.value })}
                   className="min-h-20"
                   required
                 />
               )}
-              {revision.coincide === false && (
+              {resultado !== null && PIDE_FOTO.includes(resultado) && (
                 <CampoFoto
-                  etiqueta="Foto de la discrepancia"
+                  etiqueta={resultado === "dano" ? "Foto del daño" : "Foto de la novedad"}
                   foto={revision.foto}
                   onChange={(foto) => revisar(prenda.id, { foto })}
+                  obligatoria
                 />
+              )}
+              {resultado !== null && PIDE_VALOR.includes(resultado) && (
+                <label className="flex flex-col gap-1 text-sm">
+                  <span className="font-medium text-(--sw-ink-soft)">
+                    Valor de la prenda que declara el cliente (obligatorio)
+                  </span>
+                  <ClayInput
+                    type="number"
+                    min="1"
+                    step="100"
+                    inputMode="numeric"
+                    value={revision.valor}
+                    onChange={(e) => revisar(prenda.id, { valor: e.target.value })}
+                    required
+                  />
+                  <span className="text-xs text-(--sw-ink-soft)">
+                    La lavanderia le debe este valor al cliente. Ademas, no se cobra el servicio de esta
+                    prenda ({formatCOP(valorDePrenda(prenda))}).
+                  </span>
+                </label>
               )}
             </fieldset>
           );
         })}
 
-        {hayDiscrepancias && (
+        {sinCobrar > 0 && (
           <p className="text-sm text-(--sw-ink-soft)">
-            Con alguna prenda que no coincide, la orden no se entrega: queda &quot;Con novedad&quot; hasta
-            que el cliente decida.
+            Por daños o perdidas no se cobran {formatCOP(sinCobrar)}: el total baja a{" "}
+            {formatCOP(Math.max(Number(orden.valor_total) - sinCobrar, 0))}. Si el cliente pago de mas, la
+            diferencia se le devuelve y queda en el historial.
           </p>
         )}
-        {fotos > MAXIMO_FOTOS && (
-          <p role="alert" className="text-sm font-semibold text-(--sw-ink)">
-            Adjunta como maximo {MAXIMO_FOTOS} fotos por entrega ({fotos} seleccionadas).
+        {hayNovedades && (
+          <p className="text-sm text-(--sw-ink-soft)">
+            Con alguna novedad la orden no se entrega: queda &quot;Con novedad&quot; y el cliente decide si se
+            la lleva con descuento o si se reprocesa.
           </p>
         )}
         <AlertaErrores titulo="No se pudo registrar la entrega" errores={errores} />
         <div className="flex flex-wrap gap-3">
-          <ClayButton type="submit" disabled={pending || !completa || fotos > MAXIMO_FOTOS}>
-            {pending ? "Registrando..." : hayDiscrepancias ? "Registrar novedad" : "Confirmar entrega"}
+          <ClayButton type="submit" disabled={pending || !completa}>
+            {pending ? "Registrando..." : hayNovedades ? "Registrar novedad" : "Confirmar entrega"}
           </ClayButton>
           <ClayButton type="button" variant="secundario" onClick={cancelar} disabled={pending}>
             Cancelar
