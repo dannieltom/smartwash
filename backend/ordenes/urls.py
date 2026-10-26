@@ -8,6 +8,7 @@ from .views import (
     BandejaOperarioView,
     CambiarEstadoView,
     CancelarOrdenView,
+    ConsultaPublicaView,
     DecisionNovedadView,
     FotoNovedadView,
     HistorialClienteView,
@@ -26,6 +27,9 @@ urlpatterns = [
     path("ordenes/novedades", OrdenesConNovedadView.as_view(), name="ordenes-con-novedad"),
     path("ordenes/<int:pk>/decision", DecisionNovedadView.as_view(), name="orden-decision"),
     path("ordenes/bandeja", BandejaOperarioView.as_view(), name="ordenes-bandeja"),
+    path(
+        "ordenes/consulta/<str:codigo>", ConsultaPublicaView.as_view(), name="orden-consulta"
+    ),
     path("ordenes/<int:pk>", OrdenDetailView.as_view(), name="orden-detalle"),
     path("ordenes/<int:pk>/prendas", AgregarPrendaView.as_view(), name="orden-prendas"),
     path(

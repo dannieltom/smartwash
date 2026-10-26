@@ -596,6 +596,14 @@ class OrdenBandejaSerializer(serializers.ModelSerializer):
         read_only_fields = fields
 
 
+class ConsultaPublicaSerializer(serializers.ModelSerializer):
+    # Publica: sin cliente, montos ni id interno.
+    class Meta:
+        model = Orden
+        fields = ("codigo", "estado", "fecha_estimada_entrega")
+        read_only_fields = fields
+
+
 class OrdenHistorialClienteSerializer(serializers.ModelSerializer):
     class Meta:
         model = Orden

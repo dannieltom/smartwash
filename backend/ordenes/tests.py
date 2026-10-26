@@ -2810,3 +2810,59 @@ class CancelarOrdenConNovedadApiTests(OrdenEnProcesoMixin, APITestCase):
                 self.assertIn("el servicio ya inicio", str(response.json()))
 
         self.assertFalse(self.orden.historial.filter(tipo_evento=Evento.CANCELACION).exists())
+
+
+class ConsultaPublicaApiTests(APITestCase):
+    def setUp(self):
+        self.orden = crear_orden(codigo="SW-ABCD2345")
+
+    def consultar(self, codigo="SW-ABCD2345"):
+        return self.client.get(f"/api/ordenes/consulta/{codigo}")
+
+    def fijar(self, estado, fecha=date(2026, 11, 3)):
+        Orden.objects.filter(pk=self.orden.pk).update(estado=estado, fecha_estimada_entrega=fecha)
+
+    def test_sin_sesion_ve_el_estado_y_la_fecha_estimada(self):
+        self.fijar(Orden.Estado.RECIBIDA)
+
+        response = self.consultar()
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(
+            response.json(),
+            {"codigo": "SW-ABCD2345", "estado": "Recibida", "fecha_estimada_entrega": "2026-11-03"},
+        )
+
+    def test_en_espera_se_muestra_sin_fecha_estimada(self):
+        datos = self.consultar().json()
+
+        self.assertEqual(datos["estado"], "En espera")
+        self.assertIsNone(datos["fecha_estimada_entrega"])
+
+    def test_la_orden_cancelada_se_muestra_como_cancelada(self):
+        self.fijar(Orden.Estado.CANCELADA)
+
+        self.assertEqual(self.consultar().json()["estado"], "Cancelada")
+
+    def test_un_codigo_inexistente_responde_404_con_mensaje(self):
+        response = self.consultar("SW-ZZZZ9999")
+
+        self.assertEqual(response.status_code, 404)
+        self.assertIn("No encontramos una orden con ese codigo", response.json()["detail"])
+
+    def test_no_expone_datos_del_cliente_ni_montos(self):
+        Orden.objects.filter(pk=self.orden.pk).update(valor_total=Decimal("16000"))
+
+        datos = self.consultar().json()
+
+        self.assertEqual(set(datos), {"codigo", "estado", "fecha_estimada_entrega"})
+        self.assertNotIn("Ana Gomez", str(datos))
+        self.assertNotIn("16000", str(datos))
+
+    def test_cualquier_rol_puede_consultar(self):
+        for rol in User.Rol.values:
+            with self.subTest(rol=rol):
+                self.client.force_authenticate(
+                    User.objects.create_user(username=f"u-{rol}", password="x", rol=rol)
+                )
+                self.assertEqual(self.consultar().status_code, 200)
