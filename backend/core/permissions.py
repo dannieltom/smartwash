@@ -12,6 +12,11 @@ class SoloAdministradorEscribe(BasePermission):
         return request.method in SAFE_METHODS or request.user.rol == User.Rol.ADMINISTRADOR
 
 
+class SoloAdministrador(BasePermission):
+    def has_permission(self, request, view):
+        return request.user.is_authenticated and request.user.rol == User.Rol.ADMINISTRADOR
+
+
 class AdministradorORecepcionista(BasePermission):
     def has_permission(self, request, view):
         return request.user.is_authenticated and request.user.rol in (

@@ -7,8 +7,12 @@ from .views import (
     AsignarOperarioView,
     BandejaOperarioView,
     CambiarEstadoView,
+    CambiosDescuentosNovedadView,
     CancelarOrdenView,
+    DanosView,
     DecisionNovedadView,
+    DescuentosNovedadView,
+    FotoDanoView,
     FotoNovedadView,
     HistorialClienteView,
     HistorialOrdenView,
@@ -17,6 +21,7 @@ from .views import (
     OrdenDetailView,
     OrdenListCreateView,
     OrdenesConNovedadView,
+    PagoDanoView,
     RegistrarEntregaView,
 )
 
@@ -46,4 +51,15 @@ urlpatterns = [
     path("ordenes/<int:pk>/novedades", NovedadesOrdenView.as_view(), name="orden-novedades"),
     path("novedades/<int:pk>/foto", FotoNovedadView.as_view(), name="novedad-foto"),
     path("operarios", OperariosActivosView.as_view(), name="operarios-activos"),
+    path(
+        "ordenes/descuentos-novedad", DescuentosNovedadView.as_view(), name="descuentos-novedad"
+    ),
+    path(
+        "ordenes/descuentos-novedad/cambios",
+        CambiosDescuentosNovedadView.as_view(),
+        name="descuentos-novedad-cambios",
+    ),
+    path("danos", DanosView.as_view(), name="danos"),
+    path("danos/<int:pk>/pago", PagoDanoView.as_view(), name="dano-pago"),
+    path("danos/<int:pk>/foto", FotoDanoView.as_view(), name="dano-foto"),
 ]
