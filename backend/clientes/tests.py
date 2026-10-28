@@ -149,6 +149,22 @@ class ClienteApiTests(APITestCase):
         self.ana.refresh_from_db()
         self.assertEqual(self.ana.clasificacion, Cliente.Clasificacion.OCASIONAL)
 
+    def test_el_saldo_de_puntos_se_muestra_y_es_de_solo_lectura(self):
+        Cliente.objects.filter(pk=self.ana.pk).update(puntos=16)
+        detalle = self.client.get(f"/api/clientes/{self.ana.pk}")
+        self.assertEqual(detalle.json()["puntos"], 16)
+        lista = self.client.get("/api/clientes")
+        self.assertEqual([c["puntos"] for c in lista.json()], [16])
+
+        self.client.patch(
+            f"/api/clientes/{self.ana.pk}", {"puntos": 9999}, content_type="application/json"
+        )
+        self.ana.refresh_from_db()
+        self.assertEqual(self.ana.puntos, 16)
+
+        self.client.post("/api/clientes", self.datos_cliente(puntos=500))
+        self.assertEqual(Cliente.objects.get(documento="1090999888").puntos, 0)
+
     def test_lista_y_consulta_clientes(self):
         lista = self.client.get("/api/clientes")
         self.assertEqual(lista.status_code, 200)
