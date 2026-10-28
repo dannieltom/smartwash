@@ -18,6 +18,9 @@ class Cliente(ModeloConAutoria):
         choices=Clasificacion.choices,
         default=Clasificacion.OCASIONAL,
     )
+    # db_default: las pruebas de migraciones de catalogo insertan clientes con el
+    # esquema anterior, que no conoce esta columna.
+    puntos = models.PositiveIntegerField(default=0, db_default=0)
 
     class Meta:
         ordering = ("nombre_completo",)

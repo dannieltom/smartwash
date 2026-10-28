@@ -3427,3 +3427,68 @@ class EntregaConMuchasFotosTests(CatalogoDePruebaMixin, APITestCase):
 
         self.assertEqual(response.status_code, 200, response.content[:200])
         self.assertEqual(Novedad.objects.count(), 5)
+
+
+class AcumularPuntosTests(CatalogoDePruebaMixin, APITestCase):
+    def setUp(self):
+        self.crear_catalogo()
+        self.client.force_authenticate(self.recepcionista)
+        # Dos prendas: 6000 + 10000 = 16000.
+        self.registrar(self.prenda(self.planchado), self.prenda(self.lavado, color="rojo"))
+        self.orden = Orden.objects.get()
+
+    def pagar(self, monto="16000"):
+        self.client.post(
+            f"/api/ordenes/{self.orden.pk}/pagos",
+            {"monto": monto, "metodo": "efectivo"},
+            format="json",
+        )
+
+    def entregar(self):
+        Orden.objects.filter(pk=self.orden.pk).update(estado=Orden.Estado.LISTA)
+        verificaciones = [{"prenda": p.pk, "coincide": True} for p in self.orden.prendas.all()]
+        return self.client.post(
+            f"/api/ordenes/{self.orden.pk}/entrega", {"prendas": verificaciones}, format="json"
+        )
+
+    def puntos(self):
+        self.cliente.refresh_from_db()
+        return self.cliente.puntos
+
+    def test_al_cerrar_la_orden_pagada_suma_los_puntos_al_saldo_del_cliente(self):
+        self.pagar()
+
+        response = self.entregar()
+
+        self.assertEqual(response.status_code, 200, response.json())
+        self.assertEqual(self.puntos(), 16)
+        evento = self.orden.historial.filter(tipo_evento=Evento.ENTREGA).get()
+        self.assertIn("Puntos: +16 (saldo 16)", evento.detalle)
+
+    def test_los_puntos_se_suman_al_saldo_anterior(self):
+        Cliente.objects.filter(pk=self.cliente.pk).update(puntos=5)
+        self.pagar()
+
+        self.entregar()
+
+        self.assertEqual(self.puntos(), 21)
+
+    def test_pagar_sin_cerrar_la_orden_no_suma_puntos(self):
+        self.pagar()
+
+        self.assertEqual(self.puntos(), 0)
+
+    def test_si_la_base_falla_no_se_suman_puntos_ni_se_cierra_la_orden(self):
+        self.pagar()
+
+        with mock.patch.object(
+            Cliente, "save", side_effect=OperationalError("sin conexion")
+        ), self.assertLogs("ordenes.historial", level="ERROR") as logs:
+            response = self.entregar()
+
+        self.assertEqual(response.status_code, 503)
+        self.assertIn("sin conexion", "\n".join(logs.output))
+        self.orden.refresh_from_db()
+        self.assertEqual(self.orden.estado, Orden.Estado.LISTA)
+        self.assertEqual(self.puntos(), 0)
+        self.assertFalse(self.orden.historial.filter(tipo_evento=Evento.ENTREGA).exists())

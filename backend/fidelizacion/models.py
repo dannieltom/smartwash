@@ -1,10 +1,16 @@
 from decimal import Decimal
 
+from django.conf import settings
 from django.db import models
 from django.db.models import Q
 
 from clientes.models import Cliente
 from core.models import ModeloConAutoria
+
+
+def puntos_por_consumo(valor):
+    # La fraccion no suma: $15.900 dan 15 puntos.
+    return int(valor // getattr(settings, "PUNTOS_CADA_PESOS", Decimal("1000")))
 
 
 class ReglaDescuentoQuerySet(models.QuerySet):

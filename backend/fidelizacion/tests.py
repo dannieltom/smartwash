@@ -3,10 +3,10 @@ from decimal import Decimal
 
 from django.contrib.auth import get_user_model
 from django.db import IntegrityError
-from django.test import TestCase
+from django.test import SimpleTestCase, TestCase, override_settings
 from rest_framework.test import APITestCase
 
-from .models import ReglaDescuento
+from .models import ReglaDescuento, puntos_por_consumo
 
 User = get_user_model()
 
@@ -140,3 +140,14 @@ class ReglaDescuentoApiTests(APITestCase):
         self.client.logout()
         response = self.client.post("/api/fidelizacion/reglas-descuento", self.datos_validos())
         self.assertEqual(response.status_code, 403)
+
+
+class PuntosPorConsumoTests(SimpleTestCase):
+    def test_un_punto_por_cada_mil_pesos_sin_contar_la_fraccion(self):
+        for valor, puntos in (("16000", 16), ("15900.50", 15), ("999", 0), ("0", 0)):
+            with self.subTest(valor=valor):
+                self.assertEqual(puntos_por_consumo(Decimal(valor)), puntos)
+
+    @override_settings(PUNTOS_CADA_PESOS=Decimal("500"))
+    def test_la_equivalencia_se_configura(self):
+        self.assertEqual(puntos_por_consumo(Decimal("16000")), 32)

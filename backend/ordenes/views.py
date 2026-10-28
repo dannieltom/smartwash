@@ -3,7 +3,7 @@ from datetime import timedelta
 
 from django.conf import settings
 from django.db import transaction
-from django.db.models import Prefetch, Sum
+from django.db.models import F, Prefetch, Sum
 from django.http import HttpResponse
 from django.shortcuts import get_object_or_404
 from django.utils import timezone
@@ -23,6 +23,7 @@ from core.permissions import (
     SoloAdministradorEscribe,
     SoloOperario,
 )
+from fidelizacion.models import puntos_por_consumo
 
 from .avisos import avisar_orden_lista
 from .historial import operacion_sobre_orden, registrar_evento
@@ -230,6 +231,19 @@ def reclasificar_cliente(cliente, usuario):
     return f". Cliente: {anterior} → {cliente.clasificacion}"
 
 
+def acumular_puntos(cliente, valor, usuario):
+    """Suma al saldo los puntos de la orden cerrada y devuelve la nota para el historial."""
+    puntos = puntos_por_consumo(valor)
+    if puntos == 0:
+        return ""
+    # F() suma en la base: dos entregas simultaneas del mismo cliente no se pisan.
+    cliente.puntos = F("puntos") + puntos
+    cliente.registrar_autoria(usuario)
+    cliente.save(update_fields=["puntos", "actualizado_por", "actualizado_en"])
+    cliente.refresh_from_db(fields=["puntos"])
+    return f". Puntos: +{puntos} (saldo {cliente.puntos})"
+
+
 def entregar_orden(orden, usuario, detalle):
     """Cierra la orden y devuelve lo pagado de mas si los descuentos bajaron el total."""
     saldo_a_favor = orden.saldo_a_favor()
@@ -243,7 +257,9 @@ def entregar_orden(orden, usuario, detalle):
         orden,
         Evento.ENTREGA,
         usuario,
-        f"{anterior} → Entregada. {detalle}" + reclasificar_cliente(orden.cliente, usuario),
+        f"{anterior} → Entregada. {detalle}"
+        + reclasificar_cliente(orden.cliente, usuario)
+        + acumular_puntos(orden.cliente, orden.valor_total, usuario),
     )
     if saldo_a_favor > 0:
         # Los pagos no se tocan: la devolucion queda solo en el historial, como en HU13.
