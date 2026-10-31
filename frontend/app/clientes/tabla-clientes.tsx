@@ -4,7 +4,8 @@ import Link from "next/link";
 import { Fragment, useState } from "react";
 
 import type { Cliente } from "@/lib/api";
-import { ClayBadge, ClayButton, ClayCard, clayBtnClass } from "../components/ui/clay";
+import BadgeClasificacion from "../components/clientes/badge-clasificacion";
+import { ClayButton, ClayCard, clayBtnClass } from "../components/ui/clay";
 import ClienteForm from "./cliente-form";
 
 export default function TablaClientes({ clientes }: { clientes: Cliente[] }) {
@@ -40,7 +41,7 @@ export default function TablaClientes({ clientes }: { clientes: Cliente[] }) {
                 <td data-label="Documento" className="px-5 py-3 text-(--sw-ink-soft)">{cliente.documento}</td>
                 <td data-label="Telefono" className="px-5 py-3 text-(--sw-ink-soft)">{cliente.telefono}</td>
                 <td data-label="Clasificacion" className="px-5 py-3">
-                  <ClayBadge color="mint">{cliente.clasificacion}</ClayBadge>
+                  <BadgeClasificacion clasificacion={cliente.clasificacion} />
                 </td>
                 <td className="px-5 py-3">
                   <div className="flex justify-end gap-2">
