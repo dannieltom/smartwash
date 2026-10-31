@@ -3,29 +3,38 @@
 import { useState, type FormEvent } from "react";
 
 import { rastrearOrden, type SeguimientoOrden } from "@/lib/api";
-import { AvisoPendiente, ClayBadge, ClayButton, ClayCard, ClayField, ClayInput } from "../components/ui/clay";
+import { ClayBadge, ClayButton, ClayCard, ClayField, ClayInput } from "../components/ui/clay";
+
+const MENSAJES_ERROR = {
+  no_encontrada: "No encontramos una orden con ese código. Revisa el comprobante.",
+  error: "No pudimos consultar tu pedido. Revisa tu conexión e inténtalo de nuevo en unos minutos.",
+} as const;
 
 export default function RastreoForm() {
   const [resultado, setResultado] = useState<SeguimientoOrden | null>(null);
-  const [pendiente, setPendiente] = useState(false);
+  const [error, setError] = useState<keyof typeof MENSAJES_ERROR | null>(null);
   const [pending, setPending] = useState(false);
 
   async function onSubmit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    setPending(true);
-    setPendiente(false);
+    setError(null);
     setResultado(null);
 
     const form = new FormData(event.currentTarget);
     const codigo = String(form.get("codigo") ?? "").trim();
+    if (!codigo) {
+      setError("no_encontrada");
+      return;
+    }
 
-    const orden = await rastrearOrden(codigo).catch(() => null);
+    setPending(true);
+    const respuesta = await rastrearOrden(codigo);
     setPending(false);
 
-    if (orden) {
-      setResultado(orden);
+    if (respuesta.tipo === "encontrada") {
+      setResultado(respuesta.orden);
     } else {
-      setPendiente(true);
+      setError(respuesta.tipo);
     }
   }
 
@@ -34,7 +43,7 @@ export default function RastreoForm() {
       <form onSubmit={onSubmit} className="flex flex-col gap-4 sm:flex-row sm:items-end">
         <div className="flex-1">
           <ClayField label="Codigo de tu pedido">
-            <ClayInput name="codigo" placeholder="Ej. SW-2026-00123" required />
+            <ClayInput name="codigo" placeholder="Ej. SW-ABCD2345" required />
           </ClayField>
         </div>
         <ClayButton type="submit" disabled={pending}>
@@ -58,12 +67,10 @@ export default function RastreoForm() {
         </ClayCard>
       )}
 
-      {pendiente && (
-        <AvisoPendiente>
-          GET /api/ordenes/rastrear todavia no existe: la app ordenes solo
-          tiene los modelos. El formulario queda listo para consultar por
-          codigo en cuanto se implemente el endpoint (EP04/EP05).
-        </AvisoPendiente>
+      {error && (
+        <div role="alert" className="clay-sm border-l-8 border-l-(--sw-coral) p-4 text-sm text-(--sw-ink)">
+          {MENSAJES_ERROR[error]}
+        </div>
       )}
     </div>
   );

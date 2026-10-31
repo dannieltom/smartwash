@@ -822,9 +822,19 @@ export type SeguimientoOrden = {
   fecha_entrega: string | null;
 };
 
-export async function rastrearOrden(codigo: string): Promise<SeguimientoOrden | null> {
-  const response = await api(`/ordenes/rastrear?codigo=${encodeURIComponent(codigo)}`);
-  return response.ok ? ((await response.json()) as SeguimientoOrden) : null;
+export type ResultadoRastreo =
+  | { tipo: "encontrada"; orden: SeguimientoOrden }
+  | { tipo: "no_encontrada" }
+  | { tipo: "error" };
+
+export async function rastrearOrden(codigo: string): Promise<ResultadoRastreo> {
+  try {
+    const response = await api(`/ordenes/consulta/${encodeURIComponent(codigo.trim())}`);
+    if (response.ok) return { tipo: "encontrada", orden: (await response.json()) as SeguimientoOrden };
+    return response.status === 404 ? { tipo: "no_encontrada" } : { tipo: "error" };
+  } catch {
+    return { tipo: "error" };
+  }
 }
 
 /* ------------------------------------- PQRS (EP06, publico) ------------------------------------- */
