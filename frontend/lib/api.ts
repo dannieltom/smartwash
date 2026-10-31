@@ -720,6 +720,21 @@ export async function getNovedadesOrden(id: number, cookieStore: CookieStore): P
   return fetchBackend<Novedad[]>(`/ordenes/${id}/novedades`, cookieStore);
 }
 
+/** Lo que devuelve OrdenConNovedadSerializer: solo las novedades pendientes. */
+export type OrdenConNovedad = {
+  id: number;
+  codigo: string;
+  cliente_nombre: string;
+  estado: EstadoOrden;
+  operario_nombre: string | null;
+  novedades: Novedad[];
+};
+
+/** Ordenes "Con novedad" con su decision pendiente. Solo administrador y recepcionista. */
+export async function getOrdenesConNovedad(cookieStore: CookieStore): Promise<OrdenConNovedad[] | null> {
+  return fetchBackend<OrdenConNovedad[]>("/ordenes/novedades", cookieStore);
+}
+
 /** Novedad durante el proceso: solo el operario asignado o el administrador, con
  * la orden "En proceso" o "Control de calidad". Descripcion y foto obligatorias;
  * la foto es un data URL de 500 KB o menos. La orden queda "Con novedad". */
