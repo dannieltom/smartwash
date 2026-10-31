@@ -4,7 +4,7 @@ import { useRouter } from "next/navigation";
 import { useState, type FormEvent } from "react";
 
 import { AlertaErrores } from "@/app/catalogo/errores";
-import { registrarEntrega, type Orden, type ResultadoVerificacion } from "@/lib/api";
+import { getClienteById, registrarEntrega, type Cliente, type Orden, type ResultadoVerificacion } from "@/lib/api";
 import { formatCOP } from "@/lib/format";
 import { ClayButton, ClayCard, ClayInput, ClayTextarea } from "../../components/ui/clay";
 import CampoFoto from "../campo-foto";
@@ -42,7 +42,13 @@ function estaCompleta(r: Revision) {
   );
 }
 
-export default function RegistrarEntrega({ orden }: { orden: Orden }) {
+export default function RegistrarEntrega({
+  orden,
+  clasificacionActual,
+}: {
+  orden: Orden;
+  clasificacionActual: Cliente["clasificacion"] | null;
+}) {
   const router = useRouter();
   // Las danadas o perdidas en una entrega anterior ya quedaron resueltas.
   const prendas = orden.detalle_prendas.filter((p) => p.dano === null);
@@ -92,6 +98,11 @@ export default function RegistrarEntrega({ orden }: { orden: Orden }) {
 
     if (response?.ok) {
       setAbierto(false);
+      // Un 503 no llega aqui: sin entrega confirmada no se vuelve a pedir el cliente.
+      const cliente = await getClienteById(orden.cliente);
+      if (cliente && cliente.clasificacion !== clasificacionActual) {
+        router.replace(`/ordenes/${orden.id}?clasificacion=${encodeURIComponent(cliente.clasificacion)}`);
+      }
       router.refresh();
       return;
     }

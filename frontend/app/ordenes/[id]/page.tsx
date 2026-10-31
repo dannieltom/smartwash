@@ -4,6 +4,7 @@ import { redirect } from "next/navigation";
 import type { ReactNode } from "react";
 
 import {
+  getCliente,
   getConfiguracionDescuentos,
   getCurrentUser,
   getHistorialOrden,
@@ -19,6 +20,7 @@ import {
   type TipoDano,
 } from "@/lib/api";
 import { formatCOP, formatFecha } from "@/lib/format";
+import BadgeClasificacion from "../../components/clientes/badge-clasificacion";
 import { ClayBadge, ClayCard, Encabezado } from "../../components/ui/clay";
 import EstadoAbono from "../abono";
 import { tarifasDeHoy } from "../cotizacion";
@@ -52,14 +54,14 @@ export default async function OrdenPage({
   searchParams,
 }: {
   params: Promise<{ id: string }>;
-  searchParams: Promise<{ registrada?: string }>;
+  searchParams: Promise<{ registrada?: string; clasificacion?: string }>;
 }) {
   const cookieStore = await cookies();
   const user = await getCurrentUser(cookieStore);
   if (!user) redirect("/login");
 
   const id = Number((await params).id);
-  const { registrada } = await searchParams;
+  const { registrada, clasificacion: clasificacionNueva } = await searchParams;
   const puedeEditar = user.rol !== "operario";
 
   const [orden, tiposPrenda, materiales, servicios, tarifas, pagos, operarios, novedades, historial, configuracion] = await Promise.all([
@@ -90,6 +92,9 @@ export default async function OrdenPage({
     );
   }
 
+  const cliente = puedeEditar ? await getCliente(orden.cliente, cookieStore) : null;
+  // El parametro solo dispara el aviso: se confirma contra lo que dice el servidor.
+  const clasificacionSubio = cliente !== null && clasificacionNueva === cliente.clasificacion;
   const tarifasVigentes = tarifas ? tarifasDeHoy(tarifas) : [];
   const admiteLineas = puedeEditar && ESTADOS_QUE_ADMITEN_LINEAS.includes(orden.estado);
   const conCatalogo = admiteLineas && tiposPrenda !== null && materiales !== null && servicios !== null;
@@ -116,8 +121,18 @@ export default async function OrdenPage({
           </div>
         }
       >
-        {orden.cliente_nombre}
+        <span className="inline-flex flex-wrap items-center gap-2">
+          {orden.cliente_nombre}
+          {cliente && <BadgeClasificacion clasificacion={cliente.clasificacion} conReglas />}
+        </span>
       </Encabezado>
+
+      {clasificacionSubio && cliente && (
+        <div role="status" className="clay-sm mb-6 border-l-8 border-l-(--sw-mint) p-4 text-sm">
+          <p className="font-semibold text-(--sw-ink)">Clasificacion del cliente actualizada</p>
+          <p className="mt-1 text-(--sw-ink-soft)">Con esta entrega, {orden.cliente_nombre} ahora es {cliente.clasificacion}.</p>
+        </div>
+      )}
 
       {registrada && (
         <div role="status" className="clay-sm mb-6 border-l-8 border-l-(--sw-mint) p-4 text-sm">
@@ -130,7 +145,7 @@ export default async function OrdenPage({
       )}
 
       {historial && <AvisoCliente orden={orden} historial={historial} />}
-      {puedeEditar && orden.estado === "Lista para entrega" && <RegistrarEntrega orden={orden} />}
+      {puedeEditar && orden.estado === "Lista para entrega" && <RegistrarEntrega orden={orden} clasificacionActual={cliente?.clasificacion ?? null} />}
       <CambiarEstado orden={orden} usuario={user} />
       {puedeEditar && orden.estado === "Con novedad" && novedades && configuracion && (
         <DecisionEntrega orden={orden} novedades={novedades} operarios={operarios} configuracion={configuracion} />

@@ -140,6 +140,7 @@ export type Cliente = {
   documento: string;
   telefono: string;
   correo: string;
+  /** Solo lectura: la recalcula el servidor al entregar una orden. */
   clasificacion: "Ocasional" | "Frecuente" | "VIP";
 };
 
@@ -147,6 +148,17 @@ export type ClienteFormulario = Omit<Cliente, "id" | "clasificacion">;
 
 export async function getClientes(cookieStore: CookieStore): Promise<Cliente[] | null> {
   return fetchBackend<Cliente[]>("/clientes", cookieStore);
+}
+
+export async function getCliente(id: number, cookieStore: CookieStore): Promise<Cliente | null> {
+  return fetchBackend<Cliente>(`/clientes/${id}`, cookieStore);
+}
+
+/** Version para el navegador: vuelve a pedir el cliente tras una accion, p. ej.
+ * la entrega, que es la que puede subir su clasificacion. */
+export async function getClienteById(id: number): Promise<Cliente | null> {
+  const response = await api(`/clientes/${id}`).catch(() => null);
+  return response?.ok ? ((await response.json()) as Cliente) : null;
 }
 
 export async function crearCliente(datos: ClienteFormulario): Promise<Response> {
