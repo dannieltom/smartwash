@@ -1,11 +1,10 @@
 import base64
-from datetime import date, datetime, time, timedelta
+from datetime import timedelta
 from decimal import Decimal
-from math import ceil
 
 from django.conf import settings
 from django.db import transaction
-from django.db.models import Count, F, OuterRef, Prefetch, Q, Subquery, Sum, Value
+from django.db.models import Count, F, OuterRef, Prefetch, Subquery, Sum, Value
 from django.db.models.functions import Coalesce
 from django.http import HttpResponse
 from django.shortcuts import get_object_or_404
@@ -21,6 +20,16 @@ from rest_framework.views import APIView
 
 from accounts.models import User
 from clientes.models import Cliente
+from core.listas import (
+    FECHA,
+    PAGINACION,
+    anios_de,
+    buscar_por_palabras,
+    filtrar_por_fecha,
+    opcion,
+    pide_paginacion,
+    respuesta_paginada,
+)
 from core.permissions import (
     AdministradorORecepcionista,
     OperarioSoloSusOrdenes,
@@ -104,53 +113,8 @@ def ordenes_con_detalle():
     )
 
 
-PARAMETROS_DE_BUSQUEDA = ("buscar", "estado", "anio", "mes", "dia", "pagina", "tamano")
-TAMANO_POR_DEFECTO = 20
-TAMANO_MAXIMO = 100
-
-
-def entero(params, nombre, por_defecto=None):
-    texto = params.get(nombre, "").strip()
-    if not texto:
-        return por_defecto
-    if not texto.isdigit() or int(texto) < 1:
-        raise serializers.ValidationError({nombre: "Debe ser un numero entero mayor o igual a 1."})
-    return int(texto)
-
-
-def rango_de_creacion(params):
-    """[inicio, fin) en hora de Bogota para anio, anio+mes o anio+mes+dia; None sin filtro de fecha."""
-    anio, mes, dia = (entero(params, nombre) for nombre in ("anio", "mes", "dia"))
-    if mes is not None and anio is None:
-        raise serializers.ValidationError({"mes": "Para filtrar por mes elige tambien el año."})
-    if dia is not None and mes is None:
-        raise serializers.ValidationError({"dia": "Para filtrar por dia elige tambien el mes."})
-    if anio is None:
-        return None
-    try:
-        if dia is not None:
-            inicio = date(anio, mes, dia)
-            fin = inicio + timedelta(days=1)
-        elif mes is not None:
-            inicio = date(anio, mes, 1)
-            fin = date(anio + mes // 12, mes % 12 + 1, 1)
-        else:
-            inicio, fin = date(anio, 1, 1), date(anio + 1, 1, 1)
-    except ValueError:
-        raise serializers.ValidationError({"dia" if dia else "mes" if mes else "anio": "Esa fecha no existe."})
-    local = timezone.get_current_timezone()
-    return tuple(timezone.make_aware(datetime.combine(d, time.min), local) for d in (inicio, fin))
-
-
-def buscar_por_palabras(ordenes, texto):
-    for palabra in texto.split():
-        ordenes = ordenes.filter(
-            Q(codigo__icontains=palabra)
-            | Q(cliente__nombre_completo__icontains=palabra)
-            | Q(cliente__documento__icontains=palabra)
-            | Q(cliente__telefono__icontains=palabra)
-        )
-    return ordenes
+PARAMETROS_DE_BUSQUEDA = (*PAGINACION, *FECHA, "estado")
+CAMPOS_DE_BUSQUEDA = ("codigo", "cliente__nombre_completo", "cliente__documento", "cliente__telefono")
 
 
 class OrdenListCreateView(generics.ListCreateAPIView):
@@ -167,40 +131,25 @@ class OrdenListCreateView(generics.ListCreateAPIView):
 
     def list(self, request, *args, **kwargs):
         params = request.query_params
-        if not any(nombre in params for nombre in PARAMETROS_DE_BUSQUEDA):
+        if not pide_paginacion(params, PARAMETROS_DE_BUSQUEDA):
             return super().list(request, *args, **kwargs)
 
-        pagina = entero(params, "pagina", 1)
-        tamano = min(entero(params, "tamano", TAMANO_POR_DEFECTO), TAMANO_MAXIMO)
-        estado = params.get("estado", "").strip()
-        if estado and estado not in Orden.Estado.values:
-            raise serializers.ValidationError({"estado": "Ese estado no existe."})
-        rango = rango_de_creacion(params)
-
+        estado = opcion(params, "estado", Orden.Estado.values, "Ese estado no existe.")
         visibles = self.get_queryset()
-        ordenes = buscar_por_palabras(visibles, params.get("buscar", ""))
+        ordenes = buscar_por_palabras(visibles, params.get("buscar", ""), CAMPOS_DE_BUSQUEDA)
         if estado:
             ordenes = ordenes.filter(estado=estado)
-        if rango:
-            ordenes = ordenes.filter(creado_en__gte=rango[0], creado_en__lt=rango[1])
+        ordenes = filtrar_por_fecha(ordenes, params, "creado_en")
 
-        total = ordenes.count()
-        inicio = (pagina - 1) * tamano
-        resultados = []
-        if inicio < total:
-            pagado = Pago.objects.filter(orden=OuterRef("pk")).values("orden").annotate(s=Sum("monto")).values("s")
-            resultados = ordenes.annotate(
-                total_pagado_anotado=Coalesce(Subquery(pagado), Value(Decimal("0")))
-            ).order_by("-creado_en", "-id")[inicio : inicio + tamano]
-        return Response(
-            {
-                "total": total,
-                "pagina": pagina,
-                "paginas": ceil(total / tamano),
-                "tamano": tamano,
-                "anios": [d.year for d in visibles.dates("creado_en", "year", order="DESC")],
-                "resultados": self.get_serializer(resultados, many=True).data,
-            }
+        pagado = Pago.objects.filter(orden=OuterRef("pk")).values("orden").annotate(s=Sum("monto")).values("s")
+        ordenes = ordenes.annotate(
+            total_pagado_anotado=Coalesce(Subquery(pagado), Value(Decimal("0")))
+        ).order_by("-creado_en", "-id")
+        return respuesta_paginada(
+            ordenes,
+            params,
+            lambda pagina: self.get_serializer(pagina, many=True).data,
+            anios=anios_de(visibles, "creado_en"),
         )
 
 

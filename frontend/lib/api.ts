@@ -563,50 +563,41 @@ export type PrendaFormulario = {
   servicios: number[];
 };
 
-/** Filtros de la lista de ordenes tal como viajan en la URL (?buscar=...&pagina=2). */
-export type FiltrosOrdenes = {
-  buscar: string;
-  estado: string;
-  anio: string;
-  mes: string;
-  dia: string;
-  pagina: number;
-};
+/* ------------------------------- Listas paginadas (comunes) ------------------------------- */
 
-export const ORDENES_POR_PAGINA = 20;
+export const POR_PAGINA = 20;
 
-/** GET /ordenes con filtros: la mas reciente primero. `anios` son los anos con ordenes visibles
- * para el usuario, para el selector de ano. */
-export type PaginaOrdenes = {
+/** Respuesta paginada de una lista: la mas reciente primero (salvo alertas y tarifas). `anios`
+ * llega en las listas con filtro de fecha: los anos con registros, para el selector de ano. */
+export type Pagina<T> = {
   total: number;
   pagina: number;
   paginas: number;
   tamano: number;
-  anios: number[];
-  resultados: Orden[];
+  anios?: number[];
+  resultados: T[];
 };
 
+/** Filtros de una lista tal como viajan en la URL y hacia la API (?buscar=...&estado=...). */
+export type Filtros = Record<string, string>;
+
 /** Solo los filtros con valor; `pagina` y `tamano` van siempre para recibir la respuesta paginada. */
-export function consultaDeOrdenes(filtros: FiltrosOrdenes): string {
+export function consultaDeLista(filtros: Filtros, pagina: number, tamano = POR_PAGINA): string {
   const params = new URLSearchParams();
-  for (const clave of ["buscar", "estado", "anio", "mes", "dia"] as const) {
-    const valor = filtros[clave].trim();
-    if (valor) params.set(clave, valor);
+  for (const [clave, valor] of Object.entries(filtros)) {
+    if (valor.trim()) params.set(clave, valor.trim());
   }
-  params.set("pagina", String(filtros.pagina));
-  params.set("tamano", String(ORDENES_POR_PAGINA));
+  params.set("pagina", String(pagina));
+  params.set("tamano", String(tamano));
   return params.toString();
 }
 
-export async function getOrdenesPagina(
-  cookieStore: CookieStore,
-  filtros: FiltrosOrdenes,
-): Promise<PaginaOrdenes | null> {
-  return fetchBackend<PaginaOrdenes>(`/ordenes?${consultaDeOrdenes(filtros)}`, cookieStore);
+export async function getPagina<T>(cookieStore: CookieStore, ruta: string, consulta: string): Promise<Pagina<T> | null> {
+  return fetchBackend<Pagina<T>>(`${ruta}?${consulta}`, cookieStore);
 }
 
-export async function buscarOrdenes(filtros: FiltrosOrdenes): Promise<Response> {
-  return api(`/ordenes?${consultaDeOrdenes(filtros)}`);
+export async function buscarPagina(ruta: string, consulta: string): Promise<Response> {
+  return api(`${ruta}?${consulta}`);
 }
 
 export type TipoEventoOrden =
