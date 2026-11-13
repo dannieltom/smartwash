@@ -6,10 +6,15 @@ import { Fragment, useState } from "react";
 import { actualizarReglaDescuento, leerErroresApi, type ReglaDescuento } from "@/lib/api";
 import { formatCOP, formatFecha } from "@/lib/format";
 import { ClayBadge, ClayButton, ClayCard } from "../components/ui/clay";
+import { BuscadorLocal, useFiltroLocal } from "../components/lista/filtro-local";
 import ReglaDescuentoForm from "./regla-form";
 
-export default function TablaReglas({ reglas }: { reglas: ReglaDescuento[] }) {
+export default function TablaReglas({ reglas: todas }: { reglas: ReglaDescuento[] }) {
   const router = useRouter();
+  const { texto, setTexto, filtradas: reglas } = useFiltroLocal(todas, (regla) => [
+    regla.nombre,
+    regla.clasificacion_cliente || "Cualquier cliente",
+  ]);
   const [editandoId, setEditandoId] = useState<number | null>(null);
   const [ocupadoId, setOcupadoId] = useState<number | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -28,7 +33,7 @@ export default function TablaReglas({ reglas }: { reglas: ReglaDescuento[] }) {
     setError(detalle || "No se pudo cambiar el estado de la regla.");
   }
 
-  if (reglas.length === 0) {
+  if (todas.length === 0) {
     return (
       <ClayCard>
         <p className="text-sm text-(--sw-ink-soft)">Todavia no hay reglas de descuento.</p>
@@ -38,6 +43,12 @@ export default function TablaReglas({ reglas }: { reglas: ReglaDescuento[] }) {
 
   return (
     <>
+      <BuscadorLocal etiqueta="Buscar reglas" texto={texto} onCambiar={setTexto} />
+      {reglas.length === 0 && (
+        <ClayCard className="mb-4">
+          <p className="text-sm text-(--sw-ink-soft)">Ninguna regla coincide con la búsqueda.</p>
+        </ClayCard>
+      )}
       {error && (
         <p role="alert" className="mb-4 text-sm font-medium text-(--sw-danger)">
           {error}

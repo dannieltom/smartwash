@@ -4,13 +4,14 @@ from unittest import mock
 from django.contrib.auth import get_user_model
 from django.core.cache import cache
 from django.core.exceptions import PermissionDenied
-from django.db import IntegrityError, transaction
+from django.db import IntegrityError, connection, transaction
 from django.test import TestCase
 from django.utils import timezone
 from rest_framework.test import APIClient, APITestCase
 from rest_framework.throttling import SimpleRateThrottle
 
 from clientes.models import Cliente
+from core.pruebas import PruebasDeListaMixin
 from ordenes.models import Orden
 
 from .models import Calificacion
@@ -223,3 +224,72 @@ class CalificacionesApiTests(APITestCase):
     def test_rechaza_fechas_invalidas_o_al_reves(self):
         self.assertEqual(self.consultar(self.admin, desde="ayer").status_code, 400)
         self.assertEqual(self.consultar(self.admin, desde="2026-11-10", hasta="2026-11-01").status_code, 400)
+
+
+class ListaCalificacionesPaginadaApiTests(PruebasDeListaMixin, APITestCase):
+    url = "/api/calificaciones"
+    campo_clave = "orden_codigo"
+    invalidos = ({"estrellas": "0"}, {"estrellas": "6"}, {"estrellas": "muchas"})
+
+    def setUp(self):
+        self.client.force_authenticate(
+            User.objects.create_user(username="rita", password="x", rol=User.Rol.RECEPCIONISTA)
+        )
+        self.numero = 0
+
+    def crear(self, cuando, estrellas=4, comentario="", cliente=None):
+        self.numero += 1
+        orden = crear_orden(f"SW-CAL{self.numero:05d}")
+        if cliente:
+            Orden.objects.filter(pk=orden.pk).update(cliente=cliente)
+        calificacion = Calificacion.objects.create(orden=orden, estrellas=estrellas, comentario=comentario)
+        # La calificacion es inmutable: la fecha se ajusta por SQL solo para la prueba.
+        with connection.cursor() as cursor:
+            cursor.execute("UPDATE satisfaccion_calificacion SET creada_en = %s WHERE id = %s", [cuando, calificacion.pk])
+        return calificacion
+
+    def clave(self, calificacion):
+        return calificacion.orden.codigo
+
+    def test_sin_parametros_responde_la_lista_completa_como_antes(self):
+        self.crear_varios(3)
+
+        datos = self.client.get(self.url).json()
+
+        self.assertEqual(set(datos), {"promedio", "total", "calificaciones"})
+        self.assertEqual(datos["total"], 3)
+
+    def test_el_promedio_y_el_total_son_de_todo_lo_filtrado(self):
+        manana = timezone.now() + timedelta(days=1)
+        for estrellas in (5, 4, 1):
+            self.crear(manana, estrellas=estrellas)
+
+        datos = self.listar(tamano=1).json()
+
+        self.assertEqual((datos["promedio"], datos["total"], len(datos["resultados"])), (3.3, 3, 1))
+        self.assertEqual(self.listar(estrellas=5).json()["promedio"], 5.0)
+
+    def test_busca_por_codigo_cliente_y_comentario(self):
+        manana = timezone.now() + timedelta(days=1)
+        luis = Cliente.objects.create(documento="555", nombre_completo="Luis Perez", telefono="3")
+        tarde = self.crear(manana, comentario="Llego tarde")
+        de_luis = self.crear(manana, cliente=luis)
+
+        for texto, esperada in ((tarde.orden.codigo.lower(), tarde), ("TARDE", tarde), ("luis perez", de_luis)):
+            with self.subTest(texto=texto):
+                self.assertEqual(self.claves(self.listar(buscar=texto)), [esperada.orden.codigo])
+
+    def test_filtra_por_estrellas_y_conserva_desde_y_hasta(self):
+        manana = timezone.now() + timedelta(days=1)
+        una = self.crear(manana, estrellas=1)
+        self.crear(manana, estrellas=5)
+        vieja = self.crear(timezone.now() - timedelta(days=30), estrellas=1)
+
+        self.assertEqual(self.claves(self.listar(estrellas=1)), [una.orden.codigo, vieja.orden.codigo])
+        desde = (timezone.localdate() - timedelta(days=1)).isoformat()
+        self.assertEqual(self.claves(self.listar(estrellas=1, desde=desde)), [una.orden.codigo])
+
+    def test_el_operario_no_tiene_acceso(self):
+        self.client.force_authenticate(User.objects.create_user(username="pedro", password="x", rol=User.Rol.OPERARIO))
+
+        self.assertEqual(self.listar(pagina=1).status_code, 403)

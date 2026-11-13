@@ -2,9 +2,10 @@ import { cookies } from "next/headers";
 import Link from "next/link";
 import { redirect } from "next/navigation";
 
-import { consultaDeOrdenes, getCurrentUser, getOrdenesPagina } from "@/lib/api";
+import { consultaDeLista, getCurrentUser, getPagina, type Orden } from "@/lib/api";
 import { Encabezado, clayBtnClass } from "../components/ui/clay";
-import { filtrosDesde } from "./filtros";
+import { lectorDe, paginaDesde } from "../components/lista/url";
+import { leerFiltrosOrdenes } from "./filtros";
 import ListaOrdenes from "./lista-ordenes";
 
 export default async function OrdenesPage({
@@ -16,14 +17,9 @@ export default async function OrdenesPage({
   const user = await getCurrentUser(cookieStore);
   if (!user) redirect("/login");
 
-  const params = await searchParams;
-  const filtros = filtrosDesde({
-    get: (clave) => {
-      const valor = params[clave];
-      return typeof valor === "string" ? valor : null;
-    },
-  });
-  const pagina = await getOrdenesPagina(cookieStore, filtros);
+  const lector = lectorDe(await searchParams);
+  const consulta = consultaDeLista(leerFiltrosOrdenes(lector), paginaDesde(lector));
+  const inicial = await getPagina<Orden>(cookieStore, "/ordenes", consulta);
 
   return (
     <main className="mx-auto max-w-5xl px-4 py-8 sm:px-8 sm:py-12">
@@ -41,7 +37,7 @@ export default async function OrdenesPage({
         Sigue el estado de las ordenes en curso (EP04/EP05).
       </Encabezado>
 
-      <ListaOrdenes inicial={pagina} consultaInicial={consultaDeOrdenes(filtros)} />
+      <ListaOrdenes inicial={inicial} consultaInicial={consulta} />
     </main>
   );
 }

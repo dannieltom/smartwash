@@ -178,10 +178,6 @@ export type Cliente = {
 
 export type ClienteFormulario = Omit<Cliente, "id" | "clasificacion" | "puntos">;
 
-export async function getClientes(cookieStore: CookieStore): Promise<Cliente[] | null> {
-  return fetchBackend<Cliente[]>("/clientes", cookieStore);
-}
-
 export async function getCliente(id: number, cookieStore: CookieStore): Promise<Cliente | null> {
   return fetchBackend<Cliente>(`/clientes/${id}`, cookieStore);
 }
@@ -234,10 +230,6 @@ export type UsuarioFormulario = {
   rol: Rol;
   password?: string;
 };
-
-export async function getUsuarios(cookieStore: CookieStore): Promise<UsuarioAdmin[] | null> {
-  return fetchBackend<UsuarioAdmin[]>("/usuarios", cookieStore);
-}
 
 export async function getUsuario(
   id: number,
@@ -297,14 +289,6 @@ export type AccionAuditoria = {
   detalle: string;
   fecha: string;
 };
-
-export async function getTrazabilidad(
-  cookieStore: CookieStore,
-  tipoUsuario?: TipoUsuarioAuditoria,
-): Promise<AccionAuditoria[] | null> {
-  const query = tipoUsuario ? `?rol=${encodeURIComponent(tipoUsuario)}` : "";
-  return fetchBackend<AccionAuditoria[]>(`/usuarios/trazabilidad${query}`, cookieStore);
-}
 
 /* --------------------------- Catalogo de servicios y tarifas (HU07) --------------------------- */
 
@@ -563,50 +547,46 @@ export type PrendaFormulario = {
   servicios: number[];
 };
 
-/** Filtros de la lista de ordenes tal como viajan en la URL (?buscar=...&pagina=2). */
-export type FiltrosOrdenes = {
-  buscar: string;
-  estado: string;
-  anio: string;
-  mes: string;
-  dia: string;
-  pagina: number;
-};
+/* ------------------------------- Listas paginadas (comunes) ------------------------------- */
 
-export const ORDENES_POR_PAGINA = 20;
+export const POR_PAGINA = 20;
 
-/** GET /ordenes con filtros: la mas reciente primero. `anios` son los anos con ordenes visibles
- * para el usuario, para el selector de ano. */
-export type PaginaOrdenes = {
+/** Respuesta paginada de una lista: la mas reciente primero (salvo alertas y tarifas). `anios`
+ * llega en las listas con filtro de fecha: los anos con registros, para el selector de ano. */
+export type Pagina<T> = {
   total: number;
   pagina: number;
   paginas: number;
   tamano: number;
-  anios: number[];
-  resultados: Orden[];
+  anios?: number[];
+  resultados: T[];
 };
 
+/** Filtros de una lista tal como viajan en la URL y hacia la API (?buscar=...&estado=...). */
+export type Filtros = Record<string, string>;
+
 /** Solo los filtros con valor; `pagina` y `tamano` van siempre para recibir la respuesta paginada. */
-export function consultaDeOrdenes(filtros: FiltrosOrdenes): string {
+export function consultaDeLista(filtros: Filtros, pagina: number, tamano = POR_PAGINA): string {
   const params = new URLSearchParams();
-  for (const clave of ["buscar", "estado", "anio", "mes", "dia"] as const) {
-    const valor = filtros[clave].trim();
-    if (valor) params.set(clave, valor);
+  for (const [clave, valor] of Object.entries(filtros)) {
+    if (valor.trim()) params.set(clave, valor.trim());
   }
-  params.set("pagina", String(filtros.pagina));
-  params.set("tamano", String(ORDENES_POR_PAGINA));
+  params.set("pagina", String(pagina));
+  params.set("tamano", String(tamano));
   return params.toString();
 }
 
-export async function getOrdenesPagina(
+/** R permite respuestas paginadas con datos extra, como el promedio de las calificaciones. */
+export async function getPagina<T, R extends Pagina<T> = Pagina<T>>(
   cookieStore: CookieStore,
-  filtros: FiltrosOrdenes,
-): Promise<PaginaOrdenes | null> {
-  return fetchBackend<PaginaOrdenes>(`/ordenes?${consultaDeOrdenes(filtros)}`, cookieStore);
+  ruta: string,
+  consulta: string,
+): Promise<R | null> {
+  return fetchBackend<R>(`${ruta}?${consulta}`, cookieStore);
 }
 
-export async function buscarOrdenes(filtros: FiltrosOrdenes): Promise<Response> {
-  return api(`/ordenes?${consultaDeOrdenes(filtros)}`);
+export async function buscarPagina(ruta: string, consulta: string): Promise<Response> {
+  return api(`${ruta}?${consulta}`);
 }
 
 export type TipoEventoOrden =
@@ -682,10 +662,6 @@ export type AlertaOrden = {
 
 /** Ordenes retrasadas o proximas a vencer (HU16). Al operario el backend le
  * devuelve solo las suyas. */
-export async function getAlertasOrdenes(cookieStore: CookieStore): Promise<AlertaOrden[] | null> {
-  return fetchBackend<AlertaOrden[]>("/ordenes/alertas", cookieStore);
-}
-
 export async function crearOrden(cliente: number, prendas: PrendaFormulario[]): Promise<Response> {
   return api("/ordenes", { method: "POST", body: { cliente, prendas } });
 }
@@ -746,9 +722,38 @@ export type Novedad = {
   foto_url: string | null;
   decision: DecisionNovedad | null;
   decision_observacion: string;
+  decidida_por_nombre: string | null;
+  decidida_en: string | null;
   gravedad: Gravedad | "";
   porcentaje_descuento: string | null;
   monto_descuento: string;
+};
+
+/** GET /novedades (administrador y recepcionista): todas, la mas reciente primero. "pendiente" es
+ * lo mismo que muestra la bandeja de ordenes con novedad; lo demas, "resuelta". */
+export type NovedadHistorial = Pick<
+  Novedad,
+  | "id"
+  | "prenda_nombre"
+  | "descripcion"
+  | "origen"
+  | "origen_nombre"
+  | "creado_en"
+  | "foto_url"
+  | "decision"
+  | "decision_observacion"
+  | "decidida_por_nombre"
+  | "decidida_en"
+  | "gravedad"
+  | "porcentaje_descuento"
+  | "monto_descuento"
+> & {
+  orden_id: number;
+  orden_codigo: string;
+  cliente_nombre: string;
+  registrada_por: string | null;
+  estado: "pendiente" | "resuelta";
+  decision_nombre: string | null;
 };
 
 /** Las del proceso: continuar o agregar_servicio (reprocesar y no_continuar solo
@@ -971,14 +976,6 @@ export type DanoPrenda = {
   foto_url: string | null;
 };
 
-/** Administrador y recepcionista; el operario recibe 403. */
-export async function getDanos(
-  cookieStore: CookieStore,
-  estado?: DanoPrenda["estado"],
-): Promise<DanoPrenda[] | null> {
-  return fetchBackend<DanoPrenda[]>(estado ? `/danos?estado=${estado}` : "/danos", cookieStore);
-}
-
 /** Solo el administrador; la observacion (por ejemplo, el medio de pago) es obligatoria. */
 export async function pagarDano(id: number, observacion: string): Promise<Response> {
   return api(`/danos/${id}/pago`, { method: "POST", body: { observacion } });
@@ -1094,23 +1091,9 @@ export type CalificacionRegistrada = {
 };
 
 /** GET /calificaciones (administrador y recepcionista): `promedio` con un decimal, null si no hay. */
-export type ResumenCalificaciones = {
-  promedio: number | null;
-  total: number;
-  calificaciones: CalificacionRegistrada[];
-};
-
-/** desde/hasta: AAAA-MM-DD (hasta incluye el dia completo) o fecha y hora ISO; ambos opcionales. */
-export async function getCalificaciones(
-  cookieStore: CookieStore,
-  filtros: { desde?: string; hasta?: string } = {},
-): Promise<ResumenCalificaciones | null> {
-  const params = new URLSearchParams();
-  if (filtros.desde) params.set("desde", filtros.desde);
-  if (filtros.hasta) params.set("hasta", filtros.hasta);
-  const consulta = params.size ? `?${params}` : "";
-  return fetchBackend<ResumenCalificaciones>(`/calificaciones${consulta}`, cookieStore);
-}
+/** GET /calificaciones paginado (administrador y recepcionista): `promedio`, con un decimal o null,
+ * y `total` son de todo lo filtrado, no solo de la pagina. */
+export type PaginaCalificaciones = Pagina<CalificacionRegistrada> & { promedio: number | null };
 
 /* ------------------------------------- PQRS (EP06, publico) ------------------------------------- */
 

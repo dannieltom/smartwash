@@ -13,6 +13,7 @@ from rest_framework.response import Response
 from rest_framework.throttling import ScopedRateThrottle, SimpleRateThrottle
 from rest_framework.views import APIView
 
+from core.listas import PAGINACION, buscar_por_palabras, opcion, pide_paginacion, respuesta_paginada
 from core.permissions import AdministradorORecepcionista
 from ordenes.models import Orden
 from ordenes.views import MENSAJE_CODIGO_NO_ENCONTRADO
@@ -21,6 +22,7 @@ from .models import Calificacion
 from .serializers import CalificacionSerializer, CalificarSerializer
 
 MENSAJE_YA_CALIFICADA = "Esta orden ya fue calificada."
+ESTRELLAS = ("1", "2", "3", "4", "5")
 
 
 class CalificarPorCodigoThrottle(SimpleRateThrottle):
@@ -80,23 +82,44 @@ def limite_de_fecha(request, campo, al_final_del_dia):
 
 
 class CalificacionesView(APIView):
+    """Sin buscar, estrellas, pagina ni tamano responde como antes. Con alguno, paginado; el promedio
+    y el total son siempre de todo lo filtrado, no solo de la pagina."""
+
     permission_classes = [AdministradorORecepcionista]
+    parametros_de_lista = (*PAGINACION, "estrellas")
 
     def get(self, request):
+        params = request.query_params
         desde = limite_de_fecha(request, "desde", al_final_del_dia=False)
         hasta = limite_de_fecha(request, "hasta", al_final_del_dia=True)
         if desde and hasta and desde >= hasta:
             raise serializers.ValidationError({"hasta": "Debe ser posterior a desde."})
+        estrellas = opcion(params, "estrellas", ESTRELLAS, "Elige de 1 a 5 estrellas.")
 
         calificaciones = Calificacion.objects.select_related("orden__cliente")
         if desde:
             calificaciones = calificaciones.filter(creada_en__gte=desde)
         if hasta:
             calificaciones = calificaciones.filter(creada_en__lt=hasta)
+        calificaciones = buscar_por_palabras(
+            calificaciones, params.get("buscar", ""), ("orden__codigo", "orden__cliente__nombre_completo", "comentario")
+        )
+        if estrellas:
+            calificaciones = calificaciones.filter(estrellas=int(estrellas))
         promedio = calificaciones.aggregate(promedio=Avg("estrellas"))["promedio"]
+        promedio = None if promedio is None else round(float(promedio), 1)
+        calificaciones = calificaciones.order_by("-creada_en", "-id")
+
+        if pide_paginacion(params, self.parametros_de_lista):
+            return respuesta_paginada(
+                calificaciones,
+                params,
+                lambda pagina: CalificacionSerializer(pagina, many=True).data,
+                promedio=promedio,
+            )
         return Response(
             {
-                "promedio": None if promedio is None else round(float(promedio), 1),
+                "promedio": promedio,
                 "total": calificaciones.count(),
                 "calificaciones": CalificacionSerializer(calificaciones, many=True).data,
             }

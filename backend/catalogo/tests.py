@@ -601,3 +601,59 @@ class BloqueoDeTarifaVigenteTests(APITestCase):
         )
         self.assertEqual(segunda.status_code, 201, segunda.content)
         self.assertEqual(Tarifa.objects.filter(tipo_prenda=self.camisa, vigente_hasta__isnull=True).count(), 1)
+
+
+class ListaTarifasPaginadaApiTests(APITestCase):
+    url = "/api/catalogo/tarifas"
+
+    def setUp(self):
+        self.client.force_authenticate(
+            get_user_model().objects.create_user(username="jefe", password="x", rol="administrador")
+        )
+        self.lavado = Servicio.objects.create(nombre="Lavado")
+        self.planchado = Servicio.objects.create(nombre="Planchado")
+        self.camisa = TipoPrenda.objects.create(nombre="Camisa")
+
+    def tarifa(self, servicio, tipo=None, vigente_hasta=None):
+        return Tarifa.objects.create(
+            servicio=servicio,
+            tipo_prenda=tipo,
+            valor_base=Decimal("5000"),
+            precio_por_kilo=Decimal("0"),
+            plazo_entrega_dias=1,
+            vigente_desde=date(2020, 1, 1),
+            vigente_hasta=vigente_hasta,
+        )
+
+    def ids(self, **params):
+        response = self.client.get(self.url, params)
+        self.assertEqual(response.status_code, 200)
+        return [t["id"] for t in response.json()["resultados"]]
+
+    def test_sin_parametros_responde_la_lista_completa_como_antes(self):
+        self.tarifa(self.lavado)
+
+        self.assertIsInstance(self.client.get(self.url).json(), list)
+
+    def test_pagina_conservando_el_orden_por_servicio_y_tipo(self):
+        planchado = self.tarifa(self.planchado)
+        lavado_camisa = self.tarifa(self.lavado, self.camisa)
+        lavado = self.tarifa(self.lavado)
+
+        datos = self.client.get(self.url, {"tamano": 2}).json()
+
+        self.assertEqual((datos["total"], datos["paginas"]), (3, 2))
+        self.assertEqual(self.ids(tamano=2), [lavado.pk, lavado_camisa.pk])
+        self.assertEqual(self.ids(tamano=2, pagina=2), [planchado.pk])
+        self.assertEqual(self.ids(pagina=5), [])
+        self.assertEqual(self.client.get(self.url, {"tamano": 500}).json()["tamano"], 100)
+        self.assertEqual(self.client.get(self.url, {"pagina": "0"}).status_code, 400)
+
+    def test_busca_por_servicio_y_tipo_de_prenda_y_conserva_vigentes(self):
+        lavado_camisa = self.tarifa(self.lavado, self.camisa)
+        self.tarifa(self.lavado, self.camisa, vigente_hasta=date(2021, 1, 1))
+        planchado = self.tarifa(self.planchado)
+
+        self.assertEqual(self.ids(buscar="lavado camisa", vigentes=1), [lavado_camisa.pk])
+        self.assertEqual(self.ids(buscar="PLANCH"), [planchado.pk])
+        self.assertEqual(len(self.ids(buscar="camisa")), 2)

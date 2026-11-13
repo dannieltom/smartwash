@@ -15,6 +15,7 @@ from django.db import IntegrityError, OperationalError, connection, transaction
 from django.db.migrations.executor import MigrationExecutor
 from django.db.models import ProtectedError
 from django.test import SimpleTestCase, TestCase, TransactionTestCase, override_settings
+from django.test.utils import CaptureQueriesContext
 from django.utils import timezone
 from rest_framework.exceptions import ValidationError
 from rest_framework.test import APIClient, APITestCase
@@ -22,6 +23,7 @@ from rest_framework.throttling import SimpleRateThrottle
 
 from catalogo.models import Material, NivelDificultad, Servicio, Tarifa, TipoPrenda, redondear_a_100
 from clientes.models import Cliente
+from core.pruebas import PruebasDeListaMixin
 from fidelizacion.models import ReglaDescuento
 from pagos.models import Pago
 from turnos.models import Turno
@@ -4906,3 +4908,279 @@ class ListaOrdenesPaginadaApiTests(APITestCase):
             self.con_prenda(self.orden())
         with self.assertNumQueries(11):
             self.assertEqual(len(self.listar(pagina=1).json()["resultados"]), 7)
+
+
+class ListaDanosPaginadaApiTests(PruebasDeListaMixin, APITestCase):
+    url = "/api/danos"
+    con_fecha = True
+    invalidos = ({"estado": "perdido", "pagina": "1"},)
+
+    def setUp(self):
+        self.client.force_authenticate(
+            User.objects.create_user(username="rita", password="x", rol=User.Rol.RECEPCIONISTA)
+        )
+        self.camisa = TipoPrenda.objects.create(nombre="Camisa")
+        self.numero = 0
+
+    def crear(self, cuando, tipo=None, cliente=None, operario=None, estado=DanoPrenda.Estado.PENDIENTE):
+        self.numero += 1
+        orden = crear_orden(codigo=f"SW-DAN{self.numero:05d}")
+        if cliente:
+            Orden.objects.filter(pk=orden.pk).update(cliente=cliente)
+        prenda = Prenda.objects.create(orden=orden, tipo_prenda=tipo or self.camisa)
+        dano = DanoPrenda.objects.create(
+            orden=orden,
+            prenda=prenda,
+            tipo=DanoPrenda.Tipo.DANO,
+            descripcion="Mancha",
+            valor_unitario_declarado=Decimal("1000"),
+            valor_declarado=Decimal("1000"),
+            valor_servicio=Decimal("1000"),
+            operario=operario,
+        )
+        DanoPrenda.objects.filter(pk=dano.pk).update(creado_en=cuando, estado=estado)
+        return dano
+
+    def test_busca_por_codigo_cliente_prenda_y_operario(self):
+        manana = timezone.now() + timedelta(days=1)
+        pedro = User.objects.create_user(username="pedro", first_name="Pedro", last_name="Diaz", password="x", rol=User.Rol.OPERARIO)
+        luis = Cliente.objects.create(documento="555", nombre_completo="Luis Perez", telefono="3")
+        de_pedro = self.crear(manana, operario=pedro)
+        de_luis = self.crear(manana, cliente=luis, tipo=TipoPrenda.objects.create(nombre="Pantalon"))
+
+        for texto, esperado in (
+            (de_pedro.orden.codigo.lower(), de_pedro),
+            ("perez", de_luis),
+            ("pantalon", de_luis),
+            ("DIAZ", de_pedro),
+            ("pedro camisa", de_pedro),
+        ):
+            with self.subTest(texto=texto):
+                self.assertEqual(self.claves(self.listar(buscar=texto)), [esperado.pk])
+
+    def test_el_estado_filtra_y_solo_no_pagina_como_antes(self):
+        manana = timezone.now() + timedelta(days=1)
+        pagado = self.crear(manana, estado=DanoPrenda.Estado.PAGADO)
+        pendiente = self.crear(manana - timedelta(hours=1))
+
+        self.assertEqual(self.claves(self.listar(estado="pagado", pagina=1)), [pagado.pk])
+        anterior = self.client.get(self.url, {"estado": "pendiente"}).json()
+        self.assertEqual([d["id"] for d in anterior], [pendiente.pk])
+
+    def test_el_operario_no_tiene_acceso(self):
+        self.client.force_authenticate(User.objects.create_user(username="pedro", password="x", rol=User.Rol.OPERARIO))
+
+        self.assertEqual(self.listar(pagina=1).status_code, 403)
+
+
+class HistorialNovedadesApiTests(PruebasDeListaMixin, APITestCase):
+    url = "/api/novedades"
+    con_fecha = True
+    invalidos = ({"estado": "abierta"}, {"origen": "mostrador"}, {"decision": "tirar"}, {"gravedad": "grave"})
+
+    def setUp(self):
+        self.recepcion = User.objects.create_user(
+            username="rita", first_name="Rita", last_name="Lopez", password="x", rol=User.Rol.RECEPCIONISTA
+        )
+        self.client.force_authenticate(self.recepcion)
+        self.camisa = TipoPrenda.objects.create(nombre="Camisa")
+        self.numero = 0
+
+    def crear(self, cuando, estado_orden=Orden.Estado.CON_NOVEDAD, decision=None, cliente=None, **campos):
+        self.numero += 1
+        orden = crear_orden(codigo=f"SW-NOV{self.numero:05d}")
+        Orden.objects.filter(pk=orden.pk).update(estado=estado_orden, **({"cliente": cliente} if cliente else {}))
+        prenda = Prenda.objects.create(orden=orden, tipo_prenda=campos.pop("tipo", self.camisa))
+        novedad = Novedad.objects.create(
+            orden=orden,
+            prenda=prenda,
+            descripcion=campos.pop("descripcion", "Mancha de tinta"),
+            origen=campos.pop("origen", Novedad.Origen.PROCESO),
+            estado_anterior=Orden.Estado.EN_PROCESO,
+            decision=decision,
+            **campos,
+        )
+        Novedad.objects.filter(pk=novedad.pk).update(creado_en=cuando)
+        return novedad
+
+    def test_sin_parametros_responde_la_lista_completa_como_antes(self):
+        self.crear_varios(2)
+
+        datos = self.listar().json()
+
+        self.assertEqual((datos["total"], datos["pagina"], len(datos["resultados"])), (2, 1, 2))
+
+    def test_pendiente_es_lo_mismo_que_muestra_la_bandeja(self):
+        manana = timezone.now() + timedelta(days=1)
+        sin_decidir = self.crear(manana)
+        retenida = self.crear(manana, decision=Novedad.Decision.NO_CONTINUAR)
+        cancelada = self.crear(manana, estado_orden=Orden.Estado.CANCELADA, decision=Novedad.Decision.NO_CONTINUAR)
+        continuada = self.crear(manana, estado_orden=Orden.Estado.EN_PROCESO, decision=Novedad.Decision.CONTINUAR)
+
+        estados = {r["id"]: r["estado"] for r in self.listar(pagina=1).json()["resultados"]}
+
+        self.assertEqual(
+            estados,
+            {sin_decidir.pk: "pendiente", retenida.pk: "pendiente", cancelada.pk: "resuelta", continuada.pk: "resuelta"},
+        )
+        self.assertEqual(sorted(self.claves(self.listar(estado="pendiente"))), sorted([sin_decidir.pk, retenida.pk]))
+        self.assertEqual(sorted(self.claves(self.listar(estado="resuelta"))), sorted([cancelada.pk, continuada.pk]))
+        bandeja = self.client.get("/api/ordenes/novedades").json()
+        self.assertEqual(
+            sorted(n["id"] for o in bandeja for n in o["novedades"]), sorted([sin_decidir.pk, retenida.pk])
+        )
+
+    def test_trae_quien_decidio_y_cuando_y_la_foto(self):
+        decidida_en = timezone.now()
+        novedad = self.crear(
+            timezone.now(),
+            estado_orden=Orden.Estado.ENTREGADA,
+            decision=Novedad.Decision.ENTREGAR_CON_DESCUENTO,
+            decidida_por=self.recepcion,
+            decidida_en=decidida_en,
+            decision_observacion="Acepto el descuento",
+            gravedad=Novedad.Gravedad.LEVE,
+            porcentaje_descuento=Decimal("10"),
+            monto_descuento=Decimal("1500"),
+        )
+        FotoNovedad.objects.create(novedad=novedad, contenido="aGVsbG8=", tipo="image/png", tamano=5)
+
+        datos = self.listar(pagina=1).json()["resultados"][0]
+
+        self.assertEqual(
+            set(datos),
+            {
+                "id", "orden_id", "orden_codigo", "cliente_nombre", "prenda_nombre", "descripcion", "origen",
+                "origen_nombre", "registrada_por", "creado_en", "foto_url", "estado", "decision", "decision_nombre",
+                "decision_observacion", "decidida_por_nombre", "decidida_en", "gravedad", "porcentaje_descuento",
+                "monto_descuento",
+            },
+        )
+        self.assertEqual(
+            (datos["orden_id"], datos["cliente_nombre"], datos["estado"], datos["decision_nombre"], datos["decidida_por_nombre"]),
+            (novedad.orden_id, "Ana Gomez", "resuelta", "Entregar con descuento", "Rita Lopez"),
+        )
+        self.assertEqual((datos["porcentaje_descuento"], datos["monto_descuento"]), ("10.00", "1500.00"))
+        self.assertEqual(datos["foto_url"], f"/api/novedades/{novedad.pk}/foto")
+        self.assertIsNotNone(datos["decidida_en"])
+        for usuario in (self.recepcion, User.objects.create_user(username="jefe", password="x", rol=User.Rol.ADMINISTRADOR)):
+            self.client.force_authenticate(usuario)
+            self.assertEqual(self.client.get(datos["foto_url"]).status_code, 200)
+
+    def test_el_detalle_de_la_orden_trae_quien_decidio(self):
+        novedad = self.crear(
+            timezone.now(), estado_orden=Orden.Estado.EN_PROCESO, decision=Novedad.Decision.CONTINUAR,
+            decidida_por=self.recepcion, decidida_en=timezone.now(),
+        )
+
+        datos = self.client.get(f"/api/ordenes/{novedad.orden_id}/novedades").json()[0]
+
+        self.assertEqual(datos["decidida_por_nombre"], "Rita Lopez")
+        self.assertIsNotNone(datos["decidida_en"])
+
+    def test_busca_por_codigo_cliente_cedula_descripcion_y_prenda(self):
+        manana = timezone.now() + timedelta(days=1)
+        luis = Cliente.objects.create(documento="88776655", nombre_completo="Luis Perez", telefono="3")
+        de_luis = self.crear(manana, cliente=luis, descripcion="Boton suelto", tipo=TipoPrenda.objects.create(nombre="Pantalon"))
+        otra = self.crear(manana)
+
+        for texto, esperada in (
+            (otra.orden.codigo.lower(), otra),
+            ("perez", de_luis),
+            ("887766", de_luis),
+            ("boton", de_luis),
+            ("PANTALON", de_luis),
+            ("ana tinta", otra),
+        ):
+            with self.subTest(texto=texto):
+                self.assertEqual(self.claves(self.listar(buscar=texto)), [esperada.pk])
+
+    def test_filtra_por_origen_decision_y_gravedad(self):
+        manana = timezone.now() + timedelta(days=1)
+        entrega = self.crear(manana, origen=Novedad.Origen.ENTREGA, estado_orden=Orden.Estado.ENTREGADA,
+                             decision=Novedad.Decision.ENTREGAR_CON_DESCUENTO, gravedad=Novedad.Gravedad.NOTORIA)
+        self.crear(manana)
+
+        self.assertEqual(self.claves(self.listar(origen="entrega")), [entrega.pk])
+        self.assertEqual(self.claves(self.listar(decision="entregar_con_descuento")), [entrega.pk])
+        self.assertEqual(self.claves(self.listar(gravedad="notoria")), [entrega.pk])
+
+    def test_el_operario_no_tiene_acceso(self):
+        self.client.force_authenticate(User.objects.create_user(username="pedro", password="x", rol=User.Rol.OPERARIO))
+
+        self.assertEqual(self.listar().status_code, 403)
+
+
+class ListaAlertasPaginadaApiTests(APITestCase):
+    url = "/api/ordenes/alertas"
+
+    def setUp(self):
+        self.recepcion = User.objects.create_user(username="rita", password="x", rol=User.Rol.RECEPCIONISTA)
+        self.client.force_authenticate(self.recepcion)
+        self.numero = 0
+
+    def orden(self, dias_de_retraso, cliente=None, operario=None):
+        self.numero += 1
+        orden = crear_orden(codigo=f"SW-ALE{self.numero:05d}")
+        Orden.objects.filter(pk=orden.pk).update(
+            estado=Orden.Estado.EN_PROCESO,
+            fecha_estimada_entrega=timezone.localdate() - timedelta(days=dias_de_retraso),
+            operario=operario,
+            **({"cliente": cliente} if cliente else {}),
+        )
+        orden.refresh_from_db()
+        return orden
+
+    def codigos(self, **params):
+        response = self.client.get(self.url, params)
+        self.assertEqual(response.status_code, 200)
+        return [a["codigo"] for a in response.json()["resultados"]]
+
+    def test_sin_parametros_responde_la_lista_completa_como_antes(self):
+        self.orden(1)
+
+        self.assertIsInstance(self.client.get(self.url).json(), list)
+
+    def test_pagina_por_urgencia_la_mas_retrasada_primero(self):
+        ordenes = [self.orden(dias) for dias in (1, 5, 3, 0, 4)]
+        por_urgencia = [o.codigo for o in sorted(ordenes, key=lambda o: o.fecha_estimada_entrega)]
+
+        datos = self.client.get(self.url, {"tamano": 2}).json()
+
+        self.assertEqual((datos["total"], datos["paginas"]), (5, 3))
+        self.assertEqual(self.codigos(tamano=2), por_urgencia[:2])
+        self.assertEqual(self.codigos(tamano=2, pagina=2), por_urgencia[2:4])
+        self.assertEqual(self.codigos(pagina=9), [])
+        self.assertEqual(self.client.get(self.url, {"tamano": 500}).json()["tamano"], 100)
+
+    def test_parametros_invalidos_responden_400(self):
+        for params in ({"pagina": "0"}, {"tamano": "x"}):
+            with self.subTest(params=params):
+                self.assertEqual(self.client.get(self.url, params).status_code, 400)
+
+    def test_busca_por_codigo_y_cliente(self):
+        luis = Cliente.objects.create(documento="555", nombre_completo="Luis Perez", telefono="3")
+        de_ana = self.orden(2)
+        de_luis = self.orden(1, cliente=luis)
+
+        self.assertEqual(self.codigos(buscar=de_ana.codigo.lower()), [de_ana.codigo])
+        self.assertEqual(self.codigos(buscar="luis perez"), [de_luis.codigo])
+        self.assertEqual(self.codigos(buscar="ana perez"), [])
+
+    def test_el_operario_solo_ve_las_suyas(self):
+        pedro = User.objects.create_user(username="pedro", password="x", rol=User.Rol.OPERARIO)
+        suya = self.orden(2, operario=pedro)
+        self.orden(3)
+        self.client.force_authenticate(pedro)
+
+        self.assertEqual(self.codigos(buscar="ana"), [suya.codigo])
+
+    def test_las_consultas_no_dependen_del_tamano_de_la_pagina(self):
+        self.orden(1)
+        with CaptureQueriesContext(connection) as una:
+            self.client.get(self.url, {"pagina": 1})
+
+        for dias in range(6):
+            self.orden(dias)
+        with self.assertNumQueries(len(una.captured_queries)):
+            self.assertEqual(len(self.codigos(pagina=1)), 7)
