@@ -23,6 +23,8 @@ from rest_framework.throttling import ScopedRateThrottle, SimpleRateThrottle
 from rest_framework.views import APIView
 from drf_spectacular.utils import extend_schema  # <-- Importamos extend_schema
 
+from turnos.services import turno_vigente
+
 from .models import RegistroAuditoria, User
 from .serializers import (
     MENSAJE_ULTIMO_ADMIN,
@@ -99,6 +101,8 @@ class LoginView(APIView):
 
 
 class LogoutView(APIView):
+    exento_de_turno = True
+
     @extend_schema(
         request=None,
         responses={204: None},
@@ -114,14 +118,20 @@ class MeView(APIView):
     """Usuario autenticado. Endpoint privado: responde 403 si no hay sesion.
 
     Ademas siembra la cookie csrftoken, que el frontend necesita antes del login.
+    Al operario le dice si tiene turno vigente (`en_turno`).
     """
+
+    exento_de_turno = True
 
     @extend_schema(
         responses={200: UserSerializer},
         summary="Obtener usuario actual",
     )
     def get(self, request):
-        return Response(UserSerializer(request.user).data)
+        datos = UserSerializer(request.user).data
+        if request.user.rol == User.Rol.OPERARIO:
+            datos["en_turno"] = turno_vigente(request.user) is not None
+        return Response(datos)
 
 
 logger = logging.getLogger(__name__)
@@ -237,6 +247,7 @@ class ActuarComoView(APIView):
     """
 
     permission_classes = [IsAuthenticated]
+    exento_de_turno = True
 
     def get(self, request):
         if not settings.DEBUG:
