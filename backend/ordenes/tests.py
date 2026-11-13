@@ -23,6 +23,7 @@ from rest_framework.throttling import SimpleRateThrottle
 from catalogo.models import Material, NivelDificultad, Servicio, Tarifa, TipoPrenda, redondear_a_100
 from clientes.models import Cliente
 from fidelizacion.models import ReglaDescuento
+from pagos.models import Pago
 from turnos.models import Turno
 
 from .estimacion import calcular_fecha_estimada, horas_en_proceso, sumar_dias_habiles
@@ -4711,3 +4712,197 @@ class ConsultaPorDocumentoApiTests(CatalogoDePruebaMixin, APITestCase):
         cache.clear()
         with self.assertNumQueries(6):
             self.assertEqual(len(self.consultar().json()["historial"]), 4)
+
+
+class ListaOrdenesPaginadaApiTests(APITestCase):
+    URL = "/api/ordenes"
+
+    def setUp(self):
+        self.recepcionista = User.objects.create_user(username="rita", password="x", rol=User.Rol.RECEPCIONISTA)
+        self.operario = User.objects.create_user(username="pedro", password="x", rol=User.Rol.OPERARIO)
+        self.ana = Cliente.objects.create(documento="1090123456", nombre_completo="Ana Gomez", telefono="3001112233")
+        self.luis = Cliente.objects.create(documento="88776655", nombre_completo="Luis Perez", telefono="3109998877")
+        self.numero = 0
+        self.client.force_authenticate(self.recepcionista)
+
+    def orden(self, cliente=None, creada=None, estado=Orden.Estado.RECIBIDA, operario=None):
+        self.numero += 1
+        orden = Orden.objects.create(
+            codigo=f"SW-LST{self.numero:05d}", cliente=cliente or self.ana, recepcionista=self.recepcionista
+        )
+        Orden.objects.filter(pk=orden.pk).update(
+            creado_en=creada or timezone.now() - timedelta(minutes=100 - self.numero),
+            estado=estado,
+            operario=operario,
+        )
+        orden.refresh_from_db()
+        return orden
+
+    def listar(self, **params):
+        return self.client.get(self.URL, params)
+
+    def codigos(self, response):
+        return [o["codigo"] for o in response.json()["resultados"]]
+
+    def test_sin_parametros_devuelve_la_lista_completa_como_antes(self):
+        ordenes = [self.orden() for _ in range(3)]
+
+        response = self.listar()
+
+        self.assertEqual(response.status_code, 200)
+        self.assertIsInstance(response.json(), list)
+        self.assertEqual([o["codigo"] for o in response.json()], [o.codigo for o in reversed(ordenes)])
+
+    def test_pagina_con_el_tamano_pedido(self):
+        ordenes = [self.orden() for _ in range(5)]
+
+        datos = self.listar(tamano=2).json()
+
+        self.assertEqual(
+            {k: datos[k] for k in ("total", "pagina", "paginas", "tamano")},
+            {"total": 5, "pagina": 1, "paginas": 3, "tamano": 2},
+        )
+        self.assertEqual(self.codigos(self.listar(tamano=2)), [ordenes[4].codigo, ordenes[3].codigo])
+        self.assertEqual(self.codigos(self.listar(tamano=2, pagina=2)), [ordenes[2].codigo, ordenes[1].codigo])
+        self.assertEqual(self.codigos(self.listar(tamano=2, pagina=3)), [ordenes[0].codigo])
+
+    def test_por_defecto_trae_20_por_pagina(self):
+        for _ in range(21):
+            self.orden()
+
+        datos = self.listar(pagina=1).json()
+
+        self.assertEqual((datos["tamano"], datos["paginas"], len(datos["resultados"])), (20, 2, 20))
+
+    def test_una_pagina_fuera_de_rango_viene_vacia(self):
+        self.orden()
+
+        response = self.listar(pagina=9)
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual((response.json()["total"], response.json()["resultados"]), (1, []))
+
+    def test_el_tamano_se_recorta_a_100(self):
+        self.assertEqual(self.listar(tamano=500).json()["tamano"], 100)
+
+    def test_parametros_invalidos_responden_400(self):
+        for params in (
+            {"pagina": "0"},
+            {"pagina": "dos"},
+            {"tamano": "-5"},
+            {"estado": "Perdida"},
+            {"anio": "veinte"},
+            {"mes": "3"},
+            {"anio": "2026", "dia": "4"},
+            {"anio": "2026", "mes": "2", "dia": "31"},
+            {"anio": "2026", "mes": "13"},
+        ):
+            with self.subTest(params=params):
+                self.assertEqual(self.listar(**params).status_code, 400)
+
+    def test_busca_por_codigo_nombre_apellido_cedula_y_telefono(self):
+        de_ana = self.orden()
+        de_luis = self.orden(self.luis)
+
+        for texto, esperada in (
+            (de_ana.codigo.lower(), de_ana),
+            ("ana", de_ana),
+            ("PEREZ", de_luis),
+            ("123456", de_ana),
+            ("99988", de_luis),
+        ):
+            with self.subTest(texto=texto):
+                self.assertEqual(self.codigos(self.listar(buscar=texto)), [esperada.codigo])
+
+    def test_varias_palabras_deben_coincidir_todas(self):
+        self.orden()
+        de_luis = self.orden(self.luis)
+
+        self.assertEqual(self.codigos(self.listar(buscar="  luis   perez ")), [de_luis.codigo])
+        self.assertEqual(self.codigos(self.listar(buscar="ana perez")), [])
+        self.assertEqual(self.listar(buscar="   ").json()["total"], 2)
+
+    def test_combina_la_busqueda_con_el_estado(self):
+        self.orden()
+        entregada = self.orden(estado=Orden.Estado.ENTREGADA)
+        self.orden(self.luis, estado=Orden.Estado.ENTREGADA)
+
+        self.assertEqual(self.codigos(self.listar(buscar="gomez", estado="Entregada")), [entregada.codigo])
+
+    def test_filtra_por_fecha_de_creacion_en_hora_de_bogota(self):
+        bogota = ZoneInfo("America/Bogota")
+        noche = self.orden(creada=datetime(2026, 3, 14, 23, 30, tzinfo=bogota))
+        siguiente = self.orden(creada=datetime(2026, 3, 15, 8, 0, tzinfo=bogota))
+        abril = self.orden(creada=datetime(2026, 4, 2, 10, 0, tzinfo=bogota))
+        anterior = self.orden(creada=datetime(2025, 12, 31, 23, 59, tzinfo=bogota))
+
+        self.assertEqual(self.codigos(self.listar(anio=2026)), [abril.codigo, siguiente.codigo, noche.codigo])
+        self.assertEqual(self.codigos(self.listar(anio=2026, mes=3)), [siguiente.codigo, noche.codigo])
+        self.assertEqual(self.codigos(self.listar(anio=2026, mes=3, dia=14)), [noche.codigo])
+        self.assertEqual(self.codigos(self.listar(anio=2025, mes=12, dia=31)), [anterior.codigo])
+
+    def test_anios_lista_los_anos_con_ordenes_visibles(self):
+        bogota = ZoneInfo("America/Bogota")
+        self.orden(creada=datetime(2024, 6, 1, tzinfo=bogota))
+        self.orden(creada=datetime(2026, 1, 1, 0, 30, tzinfo=bogota))
+        self.orden(creada=datetime(2026, 5, 1, tzinfo=bogota))
+
+        self.assertEqual(self.listar(estado="Cancelada").json()["anios"], [2026, 2024])
+
+    def test_el_operario_solo_encuentra_sus_ordenes(self):
+        suya = self.orden(operario=self.operario)
+        self.orden()
+        self.client.force_authenticate(self.operario)
+
+        datos = self.listar(buscar="gomez").json()
+
+        self.assertEqual((datos["total"], self.codigos(self.listar(buscar="gomez"))), (1, [suya.codigo]))
+
+    def test_la_ultima_orden_creada_va_primero_al_paginar_y_al_buscar(self):
+        primera = self.orden(creada=timezone.now() - timedelta(days=2))
+        segunda = self.orden(creada=timezone.now() - timedelta(days=1))
+        tercera = self.orden(creada=timezone.now())
+
+        esperado = [tercera.codigo, segunda.codigo, primera.codigo]
+        self.assertEqual(self.codigos(self.listar(pagina=1)), esperado)
+        self.assertEqual(self.codigos(self.listar(buscar="ana")), esperado)
+
+    def test_lo_pagado_coincide_con_la_lista_sin_paginar(self):
+        orden = self.orden()
+        Orden.objects.filter(pk=orden.pk).update(valor_total=Decimal("10000"))
+        Pago.objects.create(orden=orden, monto=Decimal("3000"), metodo=Pago.Metodo.EFECTIVO)
+        Pago.objects.create(orden=orden, monto=Decimal("2000"), metodo=Pago.Metodo.EFECTIVO)
+
+        paginada = self.listar(pagina=1).json()["resultados"][0]
+        completa = self.listar().json()[0]
+
+        for campo in ("total_pagado", "saldo_pendiente", "pago_completo", "saldo_a_favor"):
+            self.assertEqual(paginada[campo], completa[campo])
+        self.assertEqual(paginada["total_pagado"], "5000.00")
+
+    def con_prenda(self, orden):
+        if not hasattr(self, "tarifa"):
+            facil = NivelDificultad.objects.create(nombre="Facil", factor=Decimal("1"))
+            self.material = Material.objects.create(nombre="Algodon", nivel_dificultad=facil)
+            self.camisa = TipoPrenda.objects.create(nombre="Camisa")
+            self.tarifa = Tarifa.objects.create(
+                servicio=Servicio.objects.create(nombre="Lavado"),
+                valor_base=Decimal("5000"),
+                precio_por_kilo=Decimal("0"),
+                plazo_entrega_dias=1,
+                vigente_desde=date(2020, 1, 1),
+            )
+        prenda = Prenda.objects.create(orden=orden, tipo_prenda=self.camisa, material=self.material, peso=Decimal("1"))
+        OrdenServicio.objects.create(prenda=prenda, tarifa=self.tarifa, valor_aplicado=Decimal("5000"))
+        Pago.objects.create(orden=orden, monto=Decimal("1000"), metodo=Pago.Metodo.EFECTIVO)
+        return orden
+
+    def test_las_consultas_no_dependen_del_tamano_de_la_pagina(self):
+        self.con_prenda(self.orden())
+        with self.assertNumQueries(11):
+            self.listar(pagina=1)
+
+        for _ in range(6):
+            self.con_prenda(self.orden())
+        with self.assertNumQueries(11):
+            self.assertEqual(len(self.listar(pagina=1).json()["resultados"]), 7)
