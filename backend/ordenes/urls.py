@@ -10,6 +10,7 @@ from .views import (
     CambiarEstadoView,
     CambiosDescuentosNovedadView,
     CancelarOrdenView,
+    ConsultaPorDocumentoView,
     ConsultaPublicaView,
     DanosView,
     DecisionNovedadView,
@@ -35,6 +36,11 @@ urlpatterns = [
     path("ordenes/novedades", OrdenesConNovedadView.as_view(), name="ordenes-con-novedad"),
     path("ordenes/<int:pk>/decision", DecisionNovedadView.as_view(), name="orden-decision"),
     path("ordenes/bandeja", BandejaOperarioView.as_view(), name="ordenes-bandeja"),
+    path(
+        "ordenes/consulta-por-documento",
+        ConsultaPorDocumentoView.as_view(),
+        name="orden-consulta-por-documento",
+    ),
     path(
         "ordenes/consulta/<str:codigo>", ConsultaPublicaView.as_view(), name="orden-consulta"
     ),

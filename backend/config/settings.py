@@ -118,6 +118,8 @@ REST_FRAMEWORK = {
     "DEFAULT_THROTTLE_RATES": {
         "recuperar-password": "5/hour",
         "recuperar-password-cuenta": "3/hour",
+        "consulta-documento": "20/hour",
+        "consulta-documento-cuenta": "10/hour",
     },
 }
 

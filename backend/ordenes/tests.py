@@ -1,13 +1,14 @@
 import base64
 from types import SimpleNamespace
 from zoneinfo import ZoneInfo
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from datetime import timezone as dt_timezone
 from decimal import Decimal
 from unittest import mock
 
 from django.contrib.auth import get_user_model
 from django.core import mail
+from django.core.cache import cache
 from django.core.exceptions import PermissionDenied
 from django.core.exceptions import ValidationError as DjangoValidationError
 from django.db import IntegrityError, OperationalError, connection, transaction
@@ -16,7 +17,8 @@ from django.db.models import ProtectedError
 from django.test import SimpleTestCase, TestCase, TransactionTestCase, override_settings
 from django.utils import timezone
 from rest_framework.exceptions import ValidationError
-from rest_framework.test import APITestCase
+from rest_framework.test import APIClient, APITestCase
+from rest_framework.throttling import SimpleRateThrottle
 
 from catalogo.models import Material, NivelDificultad, Servicio, Tarifa, TipoPrenda, redondear_a_100
 from clientes.models import Cliente
@@ -4445,3 +4447,190 @@ class RegistrarQuejaApiTests(APITestCase):
                 self.assertIn(campo, response.json())
         self.assertEqual(self.enviar(correo="no-es-correo").status_code, 400)
         self.assertFalse(Queja.objects.exists())
+
+
+class ConsultaPorDocumentoApiTests(CatalogoDePruebaMixin, APITestCase):
+    URL = "/api/ordenes/consulta-por-documento"
+    MENSAJE = "No encontramos pedidos con esos datos. Revisa tu cédula y el correo que registraste."
+
+    def setUp(self):
+        cache.clear()
+        self.crear_catalogo()
+        Cliente.objects.filter(pk=self.cliente.pk).update(correo="ana@example.com")
+        self.tarifa_lavado = Tarifa.objects.get(tipo_prenda=self.camisa, servicio=self.lavado)
+        self.tarifa_planchado = Tarifa.objects.get(tipo_prenda=self.camisa, servicio=self.planchado)
+        self.numero = 0
+
+    def orden(self, estado, total="10000", hace_dias=0):
+        self.numero += 1
+        orden = Orden.objects.create(
+            codigo=f"SW-DOC{self.numero:05d}", cliente=self.cliente, recepcionista=self.recepcionista
+        )
+        Orden.objects.filter(pk=orden.pk).update(
+            estado=estado,
+            valor_total=Decimal(total),
+            creado_en=timezone.now() - timedelta(days=hace_dias),
+        )
+        return orden
+
+    def prenda(self, orden, cantidad=1, tipo=None, servicios=None):
+        prenda = Prenda.objects.create(
+            orden=orden, tipo_prenda=tipo or self.camisa, material=self.algodon, cantidad=cantidad, peso=Decimal("1")
+        )
+        for tarifa in servicios if servicios is not None else (self.tarifa_lavado,):
+            OrdenServicio.objects.create(prenda=prenda, tarifa=tarifa, valor_aplicado=Decimal("1000"))
+        return prenda
+
+    def consultar(self, documento="1090123456", correo="ana@example.com"):
+        return self.client.post(self.URL, {"documento": documento, "correo": correo}, format="json")
+
+    def test_separa_activas_e_historial_de_mas_reciente_a_mas_antigua(self):
+        estados = {
+            Orden.Estado.EN_ESPERA: 7,
+            Orden.Estado.CON_NOVEDAD: 6,
+            Orden.Estado.EN_PROCESO: 1,
+            Orden.Estado.LISTA: 3,
+            Orden.Estado.ENTREGADA: 5,
+            Orden.Estado.CANCELADA: 2,
+        }
+        codigos = {estado: self.orden(estado, hace_dias=dias).codigo for estado, dias in estados.items()}
+
+        response = self.consultar()
+
+        self.assertEqual(response.status_code, 200)
+        datos = response.json()
+        self.assertEqual(
+            [o["codigo"] for o in datos["activas"]],
+            [codigos[e] for e in (Orden.Estado.EN_PROCESO, Orden.Estado.LISTA, Orden.Estado.CON_NOVEDAD, Orden.Estado.EN_ESPERA)],
+        )
+        self.assertEqual(
+            [o["codigo"] for o in datos["historial"]],
+            [codigos[Orden.Estado.CANCELADA], codigos[Orden.Estado.ENTREGADA]],
+        )
+
+    def test_solo_expone_datos_no_confidenciales(self):
+        self.prenda(self.orden(Orden.Estado.EN_PROCESO))
+
+        datos = self.consultar().json()
+
+        self.assertEqual(set(datos), {"activas", "historial"})
+        orden = datos["activas"][0]
+        self.assertEqual(set(orden), {"codigo", "estado", "total", "prendas"})
+        self.assertEqual(set(orden["prendas"][0]), {"cantidad", "tipo_prenda", "servicios"})
+        texto = str(datos)
+        for privado in ("Ana Gomez", "1090123456", "ana@example.com", "3001112233", "recepcion"):
+            self.assertNotIn(privado, texto)
+
+    def test_agrupa_las_prendas_sin_las_danadas_o_perdidas_y_da_el_total_en_pesos(self):
+        orden = self.orden(Orden.Estado.EN_PROCESO, total="16500.00")
+        self.prenda(orden, cantidad=2, servicios=(self.tarifa_planchado, self.tarifa_lavado))
+        self.prenda(orden, cantidad=1, servicios=(self.tarifa_lavado, self.tarifa_planchado))
+        self.prenda(orden, tipo=self.pantalon)
+        perdida = self.prenda(orden)
+        DanoPrenda.objects.create(
+            orden=orden,
+            prenda=perdida,
+            tipo=DanoPrenda.Tipo.PERDIDA,
+            descripcion="No aparecio",
+            valor_unitario_declarado=Decimal("1"),
+            valor_declarado=Decimal("1"),
+            valor_servicio=Decimal("1"),
+        )
+
+        datos = self.consultar().json()["activas"][0]
+
+        self.assertEqual(datos["total"], 16500)
+        self.assertEqual(
+            datos["prendas"],
+            [
+                {"cantidad": 3, "tipo_prenda": "Camisa", "servicios": ["Lavado", "Planchado"]},
+                {"cantidad": 1, "tipo_prenda": "Pantalon", "servicios": ["Lavado"]},
+            ],
+        )
+
+    def test_cedula_inexistente_correo_equivocado_y_cliente_sin_correo_responden_igual(self):
+        self.orden(Orden.Estado.EN_PROCESO)
+        sin_correo = Cliente.objects.create(documento="555", nombre_completo="Luis", telefono="1")
+        Orden.objects.create(codigo="SW-SINCORR1", cliente=sin_correo, recepcionista=self.recepcionista)
+
+        for response in (
+            self.consultar(documento="999999"),
+            self.consultar(correo="otro@example.com"),
+            self.consultar(documento="555", correo="luis@example.com"),
+        ):
+            with self.subTest(response=response):
+                self.assertEqual(response.status_code, 404)
+                self.assertEqual(response.json(), {"detail": self.MENSAJE})
+
+    def test_cedula_y_correo_son_obligatorios(self):
+        for campo in ("documento", "correo"):
+            with self.subTest(campo=campo):
+                response = self.consultar(**{campo: "  "})
+
+                self.assertEqual(response.status_code, 400)
+                self.assertIn(campo, response.json())
+
+    def test_el_correo_no_distingue_mayusculas_ni_espacios_y_la_cedula_ignora_espacios(self):
+        self.orden(Orden.Estado.EN_PROCESO)
+
+        response = self.consultar(documento=" 1090 123456 ", correo="  ANA@Example.COM ")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(len(response.json()["activas"]), 1)
+
+    def test_un_cliente_sin_ordenes_recibe_listas_vacias(self):
+        self.assertEqual(self.consultar().json(), {"activas": [], "historial": []})
+
+    def test_el_limite_por_documento_cuenta_tambien_los_intentos_fallidos(self):
+        with mock.patch.dict(
+            SimpleRateThrottle.THROTTLE_RATES, {"consulta-documento-cuenta": "3/hour"}
+        ):
+            for numero in range(3):
+                self.assertEqual(self.consultar(correo=f"intento{numero}@x.co").status_code, 404)
+
+            response = self.consultar()
+
+        self.assertEqual(response.status_code, 429)
+
+    def test_el_limite_por_ip_cuenta_todas_las_cedulas(self):
+        with mock.patch.dict(SimpleRateThrottle.THROTTLE_RATES, {"consulta-documento": "2/hour"}):
+            self.consultar(documento="1")
+            self.consultar(documento="2")
+
+            response = self.consultar()
+
+        self.assertEqual(response.status_code, 429)
+
+    def test_funciona_con_la_sesion_de_un_operario_sin_turno(self):
+        User.objects.create_user(username="pedro", password="clave-123", rol=User.Rol.OPERARIO)
+        self.client.login(username="pedro", password="clave-123")
+        self.orden(Orden.Estado.EN_PROCESO)
+
+        self.assertEqual(self.consultar().status_code, 200)
+
+    def test_exige_el_token_csrf_aunque_sea_publica(self):
+        cliente = APIClient(enforce_csrf_checks=True)
+
+        response = cliente.post(self.URL, {"documento": "1090123456", "correo": "ana@example.com"}, format="json")
+
+        self.assertEqual(response.status_code, 403)
+
+    def test_el_rastreo_por_codigo_no_cambia(self):
+        orden = self.orden(Orden.Estado.EN_PROCESO)
+
+        response = self.client.get(f"/api/ordenes/consulta/{orden.codigo}")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["codigo"], orden.codigo)
+
+    def test_las_consultas_no_crecen_con_el_numero_de_ordenes(self):
+        self.prenda(self.orden(Orden.Estado.EN_PROCESO))
+        with self.assertNumQueries(6):
+            self.consultar()
+
+        for estado in (Orden.Estado.ENTREGADA, Orden.Estado.CANCELADA, Orden.Estado.RECIBIDA):
+            self.prenda(self.orden(estado))
+            self.prenda(self.orden(estado), tipo=self.pantalon)
+        cache.clear()
+        with self.assertNumQueries(6):
+            self.assertEqual(len(self.consultar().json()["historial"]), 4)

@@ -1006,6 +1006,24 @@ export async function rastrearOrden(codigo: string): Promise<Response> {
   return api(`/ordenes/consulta/${encodeURIComponent(codigo)}`);
 }
 
+/** Una orden en la consulta por cedula (HU17): sin datos del cliente, ids, pagos ni motivos. El
+ * total va en pesos enteros y las prendas agrupadas, sin las danadas o perdidas. */
+export type OrdenDeCliente = {
+  codigo: string;
+  estado: EstadoOrden;
+  total: number;
+  prendas: { cantidad: number; tipo_prenda: string; servicios: string[] }[];
+};
+
+/** Activas: todo lo que no esta Entregada ni Cancelada. Ambas listas, de la mas reciente a la mas antigua. */
+export type OrdenesDeCliente = { activas: OrdenDeCliente[]; historial: OrdenDeCliente[] };
+
+/** POST para que la cedula y el correo no queden en la URL. Cualquier dato que no coincida
+ * responde el mismo 404, y el backend limita los intentos (429). */
+export async function consultarPorDocumento(documento: string, correo: string): Promise<Response> {
+  return api("/ordenes/consulta-por-documento", { method: "POST", body: { documento, correo } });
+}
+
 /* ------------------------------------- PQRS (EP06, publico) ------------------------------------- */
 
 export type PqrsFormulario = {

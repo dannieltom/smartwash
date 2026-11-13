@@ -1063,6 +1063,21 @@ class ConsultaPublicaSerializer(serializers.ModelSerializer):
         return datos
 
 
+def normalizar_documento(documento):
+    """Igual que ClienteSerializer.validate_documento al registrar: sin espacios."""
+    return "".join(str(documento).split())
+
+
+class ConsultaPorDocumentoSerializer(serializers.Serializer):
+    documento = serializers.CharField(
+        max_length=40, error_messages={"blank": "Indica tu cedula.", "required": "Indica tu cedula."}
+    )
+    correo = serializers.CharField(
+        max_length=150,
+        error_messages={"blank": "Indica tu correo.", "required": "Indica tu correo."},
+    )
+
+
 class ComprobanteSerializer(serializers.ModelSerializer):
     tipo_nombre = serializers.CharField(source="get_tipo_display", read_only=True)
 
