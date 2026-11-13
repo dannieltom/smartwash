@@ -63,6 +63,13 @@ const ACCESOS = [
     color: "blue" as const,
     roles: ["administrador"] as Rol[],
   },
+  {
+    href: "/calificaciones",
+    titulo: "Calificaciones",
+    texto: "Que tan satisfechos quedan los clientes: promedio y comentarios por orden.",
+    color: "mint" as const,
+    roles: ["administrador", "recepcionista"] as Rol[],
+  },
 ];
 
 const FONDO_TARJETA = {

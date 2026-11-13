@@ -733,15 +733,26 @@ class Comprobante(models.Model):
 
 
 class Queja(ModeloConAutoria):
-    """Queja postventa que deja el cliente desde el formulario publico de PQRS.
+    """Solicitud que deja el cliente desde el formulario publico de PQRS.
 
-    Nace pendiente: la recepcionista la gestiona a mano.
+    Nace pendiente: la recepcionista la gestiona a mano. Solo la sugerencia puede
+    llegar sin orden.
     """
+
+    class Tipo(models.TextChoices):
+        PETICION = "peticion", "Peticion"
+        QUEJA = "queja", "Queja"
+        RECLAMO = "reclamo", "Reclamo"
+        SUGERENCIA = "sugerencia", "Sugerencia"
 
     class Estado(models.TextChoices):
         PENDIENTE = "Pendiente", "Pendiente"
 
-    orden = models.ForeignKey(Orden, on_delete=models.PROTECT, related_name="quejas")
+    # Default queja: las filas anteriores a los cuatro tipos eran todas quejas.
+    tipo = models.CharField(max_length=20, choices=Tipo.choices, default=Tipo.QUEJA)
+    orden = models.ForeignKey(
+        Orden, on_delete=models.PROTECT, null=True, blank=True, related_name="quejas"
+    )
     nombre = models.CharField(max_length=150)
     documento = models.CharField(max_length=20)
     correo = models.EmailField(max_length=150)
@@ -753,4 +764,5 @@ class Queja(ModeloConAutoria):
         ordering = ("creado_en", "id")
 
     def __str__(self):
-        return f"{self.orden.codigo} · {self.nombre} · {self.get_estado_display()}"
+        orden = self.orden.codigo if self.orden_id else "sin orden"
+        return f"{self.get_tipo_display()} · {orden} · {self.nombre} · {self.get_estado_display()}"

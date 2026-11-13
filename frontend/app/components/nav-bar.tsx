@@ -30,6 +30,7 @@ const POR_ROL: Record<Rol, Enlace[]> = {
     { href: "/ordenes/descuentos", label: "Descuentos" },
     { href: "/trazabilidad", label: "Trazabilidad" },
     { href: "/trazabilidad/actividad", label: "Actividad" },
+    { href: "/calificaciones", label: "Calificaciones" },
   ],
   recepcionista: [
     { href: "/clientes", label: "Clientes" },
@@ -38,6 +39,7 @@ const POR_ROL: Record<Rol, Enlace[]> = {
     { href: "/ordenes/alertas", label: "Alertas" },
     { href: "/ordenes/novedades", label: "Novedades" },
     { href: "/danos", label: "Danos" },
+    { href: "/calificaciones", label: "Calificaciones" },
   ],
   operario: [
     { href: "/ordenes/bandeja", label: "Mi bandeja" },

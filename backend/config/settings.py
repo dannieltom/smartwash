@@ -52,6 +52,7 @@ INSTALLED_APPS = [
     "fidelizacion",
     "pagos",
     "turnos",
+    "satisfaccion",
     # drf
     "drf_spectacular",
 ]
@@ -118,6 +119,11 @@ REST_FRAMEWORK = {
     "DEFAULT_THROTTLE_RATES": {
         "recuperar-password": "5/hour",
         "recuperar-password-cuenta": "3/hour",
+        "consulta-documento": "20/hour",
+        "consulta-documento-cuenta": "10/hour",
+        "pqrs": "10/hour",
+        "calificar-orden": "20/hour",
+        "calificar-orden-codigo": "5/hour",
     },
 }
 

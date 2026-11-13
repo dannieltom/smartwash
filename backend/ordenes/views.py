@@ -8,10 +8,13 @@ from django.db.models.functions import Coalesce
 from django.http import HttpResponse
 from django.shortcuts import get_object_or_404
 from django.utils import timezone
+from django.utils.decorators import method_decorator
+from django.views.decorators.csrf import csrf_protect
 from rest_framework import generics, serializers, status
 from rest_framework.permissions import AllowAny, IsAuthenticated
 from rest_framework.exceptions import NotFound, PermissionDenied
 from rest_framework.response import Response
+from rest_framework.throttling import ScopedRateThrottle, SimpleRateThrottle
 from rest_framework.views import APIView
 
 from accounts.models import User
@@ -50,6 +53,7 @@ from .serializers import (
     AsignacionSerializer,
     CambioEstadoSerializer,
     CancelacionSerializer,
+    ConsultaPorDocumentoSerializer,
     ConsultaPublicaSerializer,
     ConfiguracionDescuentoNovedadSerializer,
     DanoPrendaSerializer,
@@ -71,10 +75,13 @@ from .serializers import (
     agregar_prenda,
     agregar_servicio,
     asignar_operario,
+    calificacion_de,
     exigir_orden_editable,
     guardar_recalculo,
     nombre_usuario,
+    normalizar_documento,
     operarios_activos,
+    pesos,
     registrar_danos,
     registrar_decision,
     registrar_novedades,
@@ -85,7 +92,7 @@ Evento = HistorialOrden.TipoEvento
 
 
 def ordenes_con_detalle():
-    return Orden.objects.select_related("cliente").prefetch_related(
+    return Orden.objects.select_related("cliente", "calificacion").prefetch_related(
         "prendas__tipo_prenda",
         "prendas__material",
         "prendas__servicios__tarifa__servicio",
@@ -135,14 +142,80 @@ class AlertasVencimientoView(generics.ListAPIView):
         return ordenes.select_related("cliente").order_by("fecha_estimada_entrega", "creado_en")
 
 
+MENSAJE_CODIGO_NO_ENCONTRADO = "No encontramos una orden con ese codigo. Revisa el comprobante."
+
+
 class ConsultaPublicaView(APIView):
     permission_classes = [AllowAny]
 
     def get(self, request, codigo):
-        orden = Orden.objects.filter(codigo=codigo).first()
+        orden = Orden.objects.select_related("calificacion").filter(codigo=codigo).first()
         if orden is None:
-            raise NotFound("No encontramos una orden con ese codigo. Revisa el comprobante.")
+            raise NotFound(MENSAJE_CODIGO_NO_ENCONTRADO)
         return Response(ConsultaPublicaSerializer(orden).data)
+
+
+MENSAJE_SIN_PEDIDOS = "No encontramos pedidos con esos datos. Revisa tu cédula y el correo que registraste."
+ESTADOS_CERRADOS = (Orden.Estado.ENTREGADA, Orden.Estado.CANCELADA)
+
+
+class ConsultaPorDocumentoThrottle(SimpleRateThrottle):
+    """Por documento y no solo por IP: frena a quien prueba correos contra una misma cedula."""
+
+    scope = "consulta-documento-cuenta"
+
+    def get_cache_key(self, request, view):
+        documento = normalizar_documento(request.data.get("documento", "")).lower()
+        if not documento:
+            return None
+        return self.cache_format % {"scope": self.scope, "ident": documento}
+
+
+def resumen_publico(orden):
+    calificacion = calificacion_de(orden)
+    return {
+        "codigo": orden.codigo,
+        "estado": orden.estado,
+        "total": pesos(orden.valor_total),
+        "prendas": prendas_agrupadas(orden.prendas.all()),
+        "calificacion": {"estrellas": calificacion.estrellas} if calificacion else None,
+    }
+
+
+@method_decorator(csrf_protect, name="dispatch")
+class ConsultaPorDocumentoView(APIView):
+    """Publica: las ordenes del cliente que demuestra conocer su cedula y su correo.
+
+    POST para que ni la cedula ni el correo queden en URLs ni en logs. Ante cualquier fallo
+    responde el mismo 404: nadie debe poder averiguar que cedulas son clientes.
+    """
+
+    permission_classes = [AllowAny]
+    throttle_classes = [ScopedRateThrottle, ConsultaPorDocumentoThrottle]
+    throttle_scope = "consulta-documento"
+
+    def post(self, request):
+        datos = ConsultaPorDocumentoSerializer(data=request.data)
+        datos.is_valid(raise_exception=True)
+        cliente = Cliente.objects.filter(
+            documento__iexact=normalizar_documento(datos.validated_data["documento"])
+        ).first()
+        correo = datos.validated_data["correo"].strip().lower()
+        if cliente is None or not cliente.correo.strip() or cliente.correo.strip().lower() != correo:
+            raise NotFound(MENSAJE_SIN_PEDIDOS)
+
+        ordenes = (
+            cliente.ordenes.select_related("calificacion")
+            .prefetch_related(
+                Prefetch("prendas", Prenda.objects.filter(dano__isnull=True).select_related("tipo_prenda", "material")),
+                "prendas__servicios__tarifa__servicio",
+            )
+            .order_by("-creado_en", "-id")
+        )
+        activas, historial = [], []
+        for orden in ordenes:
+            (historial if orden.estado in ESTADOS_CERRADOS else activas).append(resumen_publico(orden))
+        return Response({"activas": activas, "historial": historial})
 
 
 class OrdenDetailView(generics.RetrieveAPIView):
@@ -725,3 +798,5 @@ class QuejaCreateView(generics.CreateAPIView):
 
     serializer_class = QuejaSerializer
     permission_classes = [AllowAny]
+    throttle_classes = [ScopedRateThrottle]
+    throttle_scope = "pqrs"
