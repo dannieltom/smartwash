@@ -12,10 +12,12 @@ from accounts.models import User
 from catalogo.models import Material, Servicio, Tarifa, TipoPrenda
 from catalogo.precios import calcular_precio
 from clientes.models import Cliente
+from turnos.services import turno_vigente
 
 from .estimacion import calcular_fecha_estimada, transiciones
 from .historial import operacion_sobre_orden, registrar_evento
 from .models import (
+    Comprobante,
     ConfiguracionDescuentoNovedad,
     DanoPrenda,
     FotoDano,
@@ -25,6 +27,7 @@ from .models import (
     Orden,
     OrdenServicio,
     Prenda,
+    Queja,
 )
 
 Evento = HistorialOrden.TipoEvento
@@ -290,6 +293,7 @@ class OrdenSerializer(serializers.ModelSerializer):
             tiene_abono=orden.tiene_abono(),
             pago_completo=pagado >= orden.valor_total,
             saldo_a_favor=f"{orden.saldo_a_favor():.2f}",
+            calificacion=calificacion_publica(orden),
         )
         return datos
 
@@ -324,6 +328,28 @@ class OperarioSerializer(serializers.ModelSerializer):
 
     def get_nombre(self, usuario) -> str:
         return nombre_usuario(usuario)
+
+
+class OperarioConCargaSerializer(OperarioSerializer):
+    """El operario con lo que tiene en su bandeja, para elegir a quien asignar."""
+
+    en_turno = serializers.BooleanField(read_only=True)
+    ordenes_activas = serializers.IntegerField(read_only=True)
+    prendas_activas = serializers.IntegerField(read_only=True)
+    recomendado = serializers.SerializerMethodField()
+
+    class Meta(OperarioSerializer.Meta):
+        fields = (*OperarioSerializer.Meta.fields, "en_turno", "ordenes_activas", "prendas_activas", "recomendado")
+
+    def get_recomendado(self, operario) -> bool:
+        return operario.pk == self.context.get("recomendado")
+
+
+def exigir_en_turno(operario):
+    if turno_vigente(operario) is None:
+        raise serializers.ValidationError(
+            {"operario": f"{nombre_usuario(operario)} no está en turno. Asígnala a un operario en turno."}
+        )
 
 
 class AsignacionSerializer(serializers.Serializer):
@@ -374,6 +400,8 @@ def asignar_operario(orden, operario, usuario):
         raise serializers.ValidationError(
             {"estado": f'La orden esta "{orden.estado}"; no se puede asignar ni reasignar.'}
         )
+
+    exigir_en_turno(operario)
 
     orden.operario = operario
     orden.registrar_autoria(usuario)
@@ -529,6 +557,9 @@ def aplicar_descuento(novedad, porcentaje, configuracion, gravedad=""):
 def operario_para_reproceso(orden, elegido):
     """Por defecto vuelve al mismo operario; otro solo si se elige o si el original no esta activo."""
     if elegido is not None:
+        # Elegir de nuevo al mismo operario es la opcion por defecto: no se le exige turno.
+        if elegido != orden.operario:
+            exigir_en_turno(elegido)
         return elegido
     if orden.operario is None or not orden.operario.is_active:
         raise serializers.ValidationError(
@@ -675,6 +706,7 @@ class NovedadSerializer(serializers.ModelSerializer):
     prenda_nombre = serializers.CharField(source="prenda.__str__", read_only=True)
     origen_nombre = serializers.CharField(source="get_origen_display", read_only=True)
     usuario_nombre = serializers.SerializerMethodField()
+    decidida_por_nombre = serializers.SerializerMethodField()
     foto_url = serializers.SerializerMethodField()
 
     class Meta:
@@ -693,6 +725,8 @@ class NovedadSerializer(serializers.ModelSerializer):
             "foto_url",
             "decision",
             "decision_observacion",
+            "decidida_por_nombre",
+            "decidida_en",
             "gravedad",
             "porcentaje_descuento",
             "monto_descuento",
@@ -702,10 +736,55 @@ class NovedadSerializer(serializers.ModelSerializer):
     def get_usuario_nombre(self, novedad) -> str | None:
         return nombre_usuario(novedad.creado_por) if novedad.creado_por else None
 
+    def get_decidida_por_nombre(self, novedad) -> str | None:
+        return nombre_usuario(novedad.decidida_por) if novedad.decidida_por else None
+
     def get_foto_url(self, novedad) -> str | None:
-        if not hasattr(novedad, "foto"):
+        # El historial anota tiene_foto para no traer el base64 de cada foto.
+        tiene_foto = getattr(novedad, "tiene_foto", None)
+        if not (hasattr(novedad, "foto") if tiene_foto is None else tiene_foto):
             return None
         return reverse("novedad-foto", args=[novedad.pk])
+
+
+class HistorialNovedadSerializer(NovedadSerializer):
+    orden_id = serializers.IntegerField(read_only=True)
+    orden_codigo = serializers.CharField(source="orden.codigo", read_only=True)
+    cliente_nombre = serializers.CharField(source="orden.cliente.nombre_completo", read_only=True)
+    registrada_por = serializers.SerializerMethodField()
+    estado = serializers.SerializerMethodField()
+    decision_nombre = serializers.CharField(source="get_decision_display", read_only=True, allow_null=True)
+
+    class Meta(NovedadSerializer.Meta):
+        fields = (
+            "id",
+            "orden_id",
+            "orden_codigo",
+            "cliente_nombre",
+            "prenda_nombre",
+            "descripcion",
+            "origen",
+            "origen_nombre",
+            "registrada_por",
+            "creado_en",
+            "foto_url",
+            "estado",
+            "decision",
+            "decision_nombre",
+            "decision_observacion",
+            "decidida_por_nombre",
+            "decidida_en",
+            "gravedad",
+            "porcentaje_descuento",
+            "monto_descuento",
+        )
+        read_only_fields = fields
+
+    def get_registrada_por(self, novedad) -> str | None:
+        return self.get_usuario_nombre(novedad)
+
+    def get_estado(self, novedad) -> str:
+        return "pendiente" if novedad.pendiente else "resuelta"
 
 
 class CancelacionSerializer(serializers.Serializer):
@@ -966,6 +1045,18 @@ def eventos_publicos(cambios):
     return eventos
 
 
+def calificacion_de(orden):
+    """La calificacion de satisfaccion de la orden, o None si el cliente no la ha dado."""
+    return getattr(orden, "calificacion", None)
+
+
+def calificacion_publica(orden):
+    calificacion = calificacion_de(orden)
+    if calificacion is None:
+        return None
+    return {"estrellas": calificacion.estrellas, "comentario": calificacion.comentario}
+
+
 class ConsultaPublicaSerializer(serializers.ModelSerializer):
     """Publica: solo codigo, estado, etapas y fechas; sin cliente, usuarios, montos, motivos ni ids."""
 
@@ -1029,8 +1120,33 @@ class ConsultaPublicaSerializer(serializers.ModelSerializer):
                 {"etiqueta": etiqueta, "fecha": fecha(momento)}
                 for etiqueta, momento in eventos_publicos(cambios)
             ],
+            calificacion=calificacion_publica(orden),
         )
         return datos
+
+
+def normalizar_documento(documento):
+    """Igual que ClienteSerializer.validate_documento al registrar: sin espacios."""
+    return "".join(str(documento).split())
+
+
+class ConsultaPorDocumentoSerializer(serializers.Serializer):
+    documento = serializers.CharField(
+        max_length=40, error_messages={"blank": "Indica tu cedula.", "required": "Indica tu cedula."}
+    )
+    correo = serializers.CharField(
+        max_length=150,
+        error_messages={"blank": "Indica tu correo.", "required": "Indica tu correo."},
+    )
+
+
+class ComprobanteSerializer(serializers.ModelSerializer):
+    tipo_nombre = serializers.CharField(source="get_tipo_display", read_only=True)
+
+    class Meta:
+        model = Comprobante
+        fields = ("tipo", "tipo_nombre", "generado_en", "contenido")
+        read_only_fields = fields
 
 
 class OrdenHistorialClienteSerializer(serializers.ModelSerializer):
@@ -1169,3 +1285,58 @@ class PagoDanoSerializer(serializers.Serializer):
             "blank": "Indica como se le pago al cliente.",
         }
     )
+
+
+MENSAJE_SIN_CODIGO = "Indica el codigo de la orden."
+
+
+class QuejaSerializer(serializers.ModelSerializer):
+    # Mismos campos que envia el formulario publico de PQRS.
+    tipo = serializers.ChoiceField(
+        choices=Queja.Tipo.choices,
+        write_only=True,
+        error_messages={"invalid_choice": "Elige peticion, queja, reclamo o sugerencia."},
+    )
+    codigo_orden = serializers.CharField(write_only=True, required=False, allow_blank=True)
+
+    class Meta:
+        model = Queja
+        fields = (
+            "id",
+            "tipo",
+            "codigo_orden",
+            "nombre",
+            "documento",
+            "correo",
+            "telefono",
+            "mensaje",
+            "estado",
+            "creado_en",
+        )
+        read_only_fields = ("id", "estado", "creado_en")
+
+    def validate(self, datos):
+        codigo = datos.pop("codigo_orden", "").strip()
+        tipo = datos["tipo"]
+        if not codigo:
+            if tipo != Queja.Tipo.SUGERENCIA:
+                raise serializers.ValidationError({"codigo_orden": MENSAJE_SIN_CODIGO})
+            datos["orden"] = None
+            return datos
+        orden = Orden.objects.filter(codigo=codigo).first()
+        if orden is None:
+            raise serializers.ValidationError(
+                {"codigo_orden": "No encontramos una orden con ese codigo. Revisa el comprobante."}
+            )
+        if tipo == Queja.Tipo.QUEJA and orden.estado != Orden.Estado.ENTREGADA:
+            raise serializers.ValidationError(
+                {"codigo_orden": "La queja solo aplica a ordenes ya entregadas."}
+            )
+        datos["orden"] = orden
+        return datos
+
+    def create(self, validated_data):
+        queja = Queja(**validated_data)
+        queja.registrar_autoria(self.context["request"].user)
+        queja.save()
+        return queja

@@ -1,20 +1,36 @@
 import base64
 from datetime import timedelta
+from decimal import Decimal
 
 from django.conf import settings
 from django.db import transaction
-from django.db.models import F, Prefetch, Sum
+from django.db.models import Count, Exists, F, OuterRef, Prefetch, Subquery, Sum, Value
+from django.db.models.functions import Coalesce
 from django.http import HttpResponse
 from django.shortcuts import get_object_or_404
 from django.utils import timezone
+from django.utils.decorators import method_decorator
+from django.views.decorators.csrf import csrf_protect
 from rest_framework import generics, serializers, status
 from rest_framework.permissions import AllowAny, IsAuthenticated
 from rest_framework.exceptions import NotFound, PermissionDenied
 from rest_framework.response import Response
+from rest_framework.throttling import ScopedRateThrottle, SimpleRateThrottle
 from rest_framework.views import APIView
 
 from accounts.models import User
 from clientes.models import Cliente
+from core.listas import (
+    FECHA,
+    PAGINACION,
+    ListaPaginadaMixin,
+    anios_de,
+    buscar_por_palabras,
+    filtrar_por_fecha,
+    opcion,
+    pide_paginacion,
+    respuesta_paginada,
+)
 from core.permissions import (
     AdministradorORecepcionista,
     OperarioSoloSusOrdenes,
@@ -24,11 +40,16 @@ from core.permissions import (
     SoloOperario,
 )
 from fidelizacion.models import puntos_por_consumo
+from pagos.models import Pago
+from turnos.services import esta_en_turno
 
 from .avisos import avisar_orden_lista
+from .comprobantes import generar_comprobante
 from .historial import operacion_sobre_orden, registrar_evento
 from .models import (
+    ESTADOS_FUERA_DE_BANDEJA,
     CambioConfiguracionDescuento,
+    Comprobante,
     ConfiguracionDescuentoNovedad,
     DanoPrenda,
     FotoDano,
@@ -40,10 +61,12 @@ from .models import (
     clasificacion_por_consumo,
 )
 from .serializers import (
+    ComprobanteSerializer,
     AgregarServicioSerializer,
     AsignacionSerializer,
     CambioEstadoSerializer,
     CancelacionSerializer,
+    ConsultaPorDocumentoSerializer,
     ConsultaPublicaSerializer,
     ConfiguracionDescuentoNovedadSerializer,
     DanoPrendaSerializer,
@@ -51,8 +74,10 @@ from .serializers import (
     EntregaSerializer,
     HistorialOrdenSerializer,
     NovedadEntradaSerializer,
+    HistorialNovedadSerializer,
     NovedadSerializer,
-    OperarioSerializer,
+    OperarioConCargaSerializer,
+    nombre_usuario,
     OrdenAlertaSerializer,
     OrdenBandejaSerializer,
     OrdenConNovedadSerializer,
@@ -60,13 +85,17 @@ from .serializers import (
     OrdenSerializer,
     PagoDanoSerializer,
     PrendaEntradaSerializer,
+    QuejaSerializer,
     agregar_prenda,
     agregar_servicio,
     asignar_operario,
+    calificacion_de,
     exigir_orden_editable,
     guardar_recalculo,
     nombre_usuario,
+    normalizar_documento,
     operarios_activos,
+    pesos,
     registrar_danos,
     registrar_decision,
     registrar_novedades,
@@ -77,7 +106,7 @@ Evento = HistorialOrden.TipoEvento
 
 
 def ordenes_con_detalle():
-    return Orden.objects.select_related("cliente").prefetch_related(
+    return Orden.objects.select_related("cliente", "calificacion").prefetch_related(
         "prendas__tipo_prenda",
         "prendas__material",
         "prendas__servicios__tarifa__servicio",
@@ -86,7 +115,13 @@ def ordenes_con_detalle():
     )
 
 
+PARAMETROS_DE_BUSQUEDA = (*PAGINACION, *FECHA, "estado")
+CAMPOS_DE_BUSQUEDA = ("codigo", "cliente__nombre_completo", "cliente__documento", "cliente__telefono")
+
+
 class OrdenListCreateView(generics.ListCreateAPIView):
+    """Sin parametros de busqueda devuelve la lista completa, como antes de la paginacion."""
+
     serializer_class = OrdenSerializer
     permission_classes = [RecepcionEscribe]
 
@@ -96,8 +131,33 @@ class OrdenListCreateView(generics.ListCreateAPIView):
             return ordenes.filter(operario=self.request.user)
         return ordenes
 
+    def list(self, request, *args, **kwargs):
+        params = request.query_params
+        if not pide_paginacion(params, PARAMETROS_DE_BUSQUEDA):
+            return super().list(request, *args, **kwargs)
 
-class AlertasVencimientoView(generics.ListAPIView):
+        estado = opcion(params, "estado", Orden.Estado.values, "Ese estado no existe.")
+        visibles = self.get_queryset()
+        ordenes = buscar_por_palabras(visibles, params.get("buscar", ""), CAMPOS_DE_BUSQUEDA)
+        if estado:
+            ordenes = ordenes.filter(estado=estado)
+        ordenes = filtrar_por_fecha(ordenes, params, "creado_en")
+
+        pagado = Pago.objects.filter(orden=OuterRef("pk")).values("orden").annotate(s=Sum("monto")).values("s")
+        ordenes = ordenes.annotate(
+            total_pagado_anotado=Coalesce(Subquery(pagado), Value(Decimal("0")))
+        ).order_by("-creado_en", "-id")
+        return respuesta_paginada(
+            ordenes,
+            params,
+            lambda pagina: self.get_serializer(pagina, many=True).data,
+            anios=anios_de(visibles, "creado_en"),
+        )
+
+
+class AlertasVencimientoView(ListaPaginadaMixin, generics.ListAPIView):
+    """Por urgencia y no por fecha de creacion, tambien al buscar y paginar."""
+
     serializer_class = OrdenAlertaSerializer
     # Antes de "Recibida" no hay fecha estimada; despues de "Lista" ya no hay que alertar.
     ESTADOS_CON_ALERTA = (
@@ -124,17 +184,86 @@ class AlertasVencimientoView(generics.ListAPIView):
         if self.request.user.rol == User.Rol.OPERARIO:
             ordenes = ordenes.filter(operario=self.request.user)
         # La fecha mas antigua primero: las mas retrasadas encabezan la lista.
-        return ordenes.select_related("cliente").order_by("fecha_estimada_entrega", "creado_en")
+        return ordenes.select_related("cliente").order_by("fecha_estimada_entrega", "creado_en", "id")
+
+    def filtrar_lista(self, ordenes, params):
+        return buscar_por_palabras(ordenes, params.get("buscar", ""), ("codigo", "cliente__nombre_completo"))
+
+
+MENSAJE_CODIGO_NO_ENCONTRADO = "No encontramos una orden con ese codigo. Revisa el comprobante."
 
 
 class ConsultaPublicaView(APIView):
     permission_classes = [AllowAny]
 
     def get(self, request, codigo):
-        orden = Orden.objects.filter(codigo=codigo).first()
+        orden = Orden.objects.select_related("calificacion").filter(codigo=codigo).first()
         if orden is None:
-            raise NotFound("No encontramos una orden con ese codigo. Revisa el comprobante.")
+            raise NotFound(MENSAJE_CODIGO_NO_ENCONTRADO)
         return Response(ConsultaPublicaSerializer(orden).data)
+
+
+MENSAJE_SIN_PEDIDOS = "No encontramos pedidos con esos datos. Revisa tu cédula y el correo que registraste."
+ESTADOS_CERRADOS = (Orden.Estado.ENTREGADA, Orden.Estado.CANCELADA)
+
+
+class ConsultaPorDocumentoThrottle(SimpleRateThrottle):
+    """Por documento y no solo por IP: frena a quien prueba correos contra una misma cedula."""
+
+    scope = "consulta-documento-cuenta"
+
+    def get_cache_key(self, request, view):
+        documento = normalizar_documento(request.data.get("documento", "")).lower()
+        if not documento:
+            return None
+        return self.cache_format % {"scope": self.scope, "ident": documento}
+
+
+def resumen_publico(orden):
+    calificacion = calificacion_de(orden)
+    return {
+        "codigo": orden.codigo,
+        "estado": orden.estado,
+        "total": pesos(orden.valor_total),
+        "prendas": prendas_agrupadas(orden.prendas.all()),
+        "calificacion": {"estrellas": calificacion.estrellas} if calificacion else None,
+    }
+
+
+@method_decorator(csrf_protect, name="dispatch")
+class ConsultaPorDocumentoView(APIView):
+    """Publica: las ordenes del cliente que demuestra conocer su cedula y su correo.
+
+    POST para que ni la cedula ni el correo queden en URLs ni en logs. Ante cualquier fallo
+    responde el mismo 404: nadie debe poder averiguar que cedulas son clientes.
+    """
+
+    permission_classes = [AllowAny]
+    throttle_classes = [ScopedRateThrottle, ConsultaPorDocumentoThrottle]
+    throttle_scope = "consulta-documento"
+
+    def post(self, request):
+        datos = ConsultaPorDocumentoSerializer(data=request.data)
+        datos.is_valid(raise_exception=True)
+        cliente = Cliente.objects.filter(
+            documento__iexact=normalizar_documento(datos.validated_data["documento"])
+        ).first()
+        correo = datos.validated_data["correo"].strip().lower()
+        if cliente is None or not cliente.correo.strip() or cliente.correo.strip().lower() != correo:
+            raise NotFound(MENSAJE_SIN_PEDIDOS)
+
+        ordenes = (
+            cliente.ordenes.select_related("calificacion")
+            .prefetch_related(
+                Prefetch("prendas", Prenda.objects.filter(dano__isnull=True).select_related("tipo_prenda", "material")),
+                "prendas__servicios__tarifa__servicio",
+            )
+            .order_by("-creado_en", "-id")
+        )
+        activas, historial = [], []
+        for orden in ordenes:
+            (historial if orden.estado in ESTADOS_CERRADOS else activas).append(resumen_publico(orden))
+        return Response({"activas": activas, "historial": historial})
 
 
 class OrdenDetailView(generics.RetrieveAPIView):
@@ -148,12 +277,7 @@ class OrdenDetailView(generics.RetrieveAPIView):
 class BandejaOperarioView(generics.ListAPIView):
     serializer_class = OrdenBandejaSerializer
     permission_classes = [SoloOperario]
-    # Sin operario no hay "En espera"; se excluye igual por si un camino futuro lo permite.
-    ESTADOS_FUERA_DE_BANDEJA = (
-        Orden.Estado.EN_ESPERA,
-        Orden.Estado.ENTREGADA,
-        Orden.Estado.CANCELADA,
-    )
+    ESTADOS_FUERA_DE_BANDEJA = ESTADOS_FUERA_DE_BANDEJA
 
     def get_queryset(self):
         # Una prenda danada o perdida ya no se procesa aunque la orden vuelva a proceso.
@@ -271,6 +395,19 @@ def entregar_orden(orden, usuario, detalle):
             f"${saldo_a_favor} devueltos al cliente: lo pagado supera el total con "
             f"descuentos (${orden.valor_total})",
         )
+    generar_comprobante(orden, Comprobante.Tipo.ENTREGA)
+
+
+class ComprobantesOrdenView(generics.ListAPIView):
+    """Los comprobantes de la orden (HU22), tal como se generaron."""
+
+    serializer_class = ComprobanteSerializer
+    permission_classes = [AdministradorORecepcionista]
+    pagination_class = None
+
+    def get_queryset(self):
+        orden = get_object_or_404(Orden, pk=self.kwargs["pk"])
+        return orden.comprobantes.all()
 
 
 class RegistrarEntregaView(APIView):
@@ -378,12 +515,101 @@ class AsignarOperarioView(APIView):
         return Response(OrdenSerializer(ordenes_con_detalle().get(pk=orden.pk)).data)
 
 
+def subconsulta_por_operario(queryset, agregado):
+    """El agregado por operario como subconsulta, para anotar a todos en una sola consulta."""
+    return Coalesce(
+        Subquery(queryset.order_by().values("operario_id").annotate(valor=agregado).values("valor")[:1]),
+        Value(0),
+    )
+
+
 class OperariosActivosView(generics.ListAPIView):
-    serializer_class = OperarioSerializer
+    """Los operarios activos con su carga. El recomendado es el de menos prendas entre los que estan en turno."""
+
+    serializer_class = OperarioConCargaSerializer
     permission_classes = [AdministradorORecepcionista]
 
     def get_queryset(self):
-        return operarios_activos().order_by("first_name", "last_name", "username")
+        activas = Orden.objects.filter(operario=OuterRef("pk")).exclude(estado__in=ESTADOS_FUERA_DE_BANDEJA)
+        prendas = Prenda.objects.filter(
+            orden__operario=OuterRef("pk"), dano__isnull=True
+        ).exclude(orden__estado__in=ESTADOS_FUERA_DE_BANDEJA).annotate(operario_id=F("orden__operario"))
+        return (
+            operarios_activos()
+            .annotate(
+                en_turno=esta_en_turno(),
+                ordenes_activas=subconsulta_por_operario(activas, Count("pk")),
+                prendas_activas=subconsulta_por_operario(prendas, Sum("cantidad")),
+            )
+            .order_by("first_name", "last_name", "username")
+        )
+
+    def list(self, request, *args, **kwargs):
+        operarios = list(self.get_queryset())
+        recomendado = min(
+            (o for o in operarios if o.en_turno),
+            key=lambda o: (o.prendas_activas, o.ordenes_activas, nombre_usuario(o).lower()),
+            default=None,
+        )
+        contexto = {**self.get_serializer_context(), "recomendado": recomendado.pk if recomendado else None}
+        return Response(self.get_serializer_class()(operarios, many=True, context=contexto).data)
+
+
+def prendas_agrupadas(prendas):
+    """Las prendas identicas en una linea, con la misma clave que frontend/app/ordenes/agrupar.ts."""
+    grupos = {}
+    for prenda in prendas:
+        servicios = sorted(linea.tarifa.servicio.nombre for linea in prenda.servicios.all())
+        clave = (
+            prenda.tipo_prenda.nombre,
+            prenda.material.nombre if prenda.material_id else None,
+            prenda.talla,
+            prenda.genero,
+            prenda.color,
+            prenda.estado_inicial,
+            None if prenda.peso is None else float(prenda.peso),
+            tuple(servicios),
+        )
+        grupo = grupos.setdefault(clave, {"cantidad": 0, "tipo_prenda": prenda.tipo_prenda.nombre, "servicios": servicios})
+        grupo["cantidad"] += prenda.cantidad
+    return list(grupos.values())
+
+
+class OrdenesDeOperarioView(APIView):
+    """Las ordenes activas de un operario, en el orden de su bandeja."""
+
+    permission_classes = [AdministradorORecepcionista]
+
+    def get(self, request, pk):
+        operario = get_object_or_404(User, pk=pk, rol=User.Rol.OPERARIO)
+        asignacion = HistorialOrden.objects.filter(
+            orden=OuterRef("pk"), tipo_evento__in=(Evento.ASIGNACION, Evento.REASIGNACION)
+        ).order_by("-fecha", "-id")
+        por_procesar = Prenda.objects.filter(dano__isnull=True).select_related("tipo_prenda", "material")
+        ordenes = (
+            Orden.objects.filter(operario=operario)
+            .exclude(estado__in=ESTADOS_FUERA_DE_BANDEJA)
+            .select_related("cliente")
+            .prefetch_related(Prefetch("prendas", por_procesar), "prendas__servicios__tarifa__servicio")
+            # La ultima asignacion de una orden que hoy es suya es la que se la dio a el.
+            .annotate(fecha_asignacion=Subquery(asignacion.values("fecha")[:1]))
+            .order_by("fecha_estimada_entrega", "creado_en")
+        )
+        fecha = serializers.DateTimeField().to_representation
+        return Response(
+            [
+                {
+                    "id": orden.id,
+                    "codigo": orden.codigo,
+                    "fecha_asignacion": fecha(orden.fecha_asignacion) if orden.fecha_asignacion else None,
+                    "cliente_nombre": orden.cliente.nombre_completo,
+                    "estado": orden.estado,
+                    "total_prendas": sum(prenda.cantidad for prenda in orden.prendas.all()),
+                    "prendas": prendas_agrupadas(orden.prendas.all()),
+                }
+                for orden in ordenes
+            ]
+        )
 
 
 class HistorialOrdenView(generics.ListAPIView):
@@ -431,7 +657,7 @@ class NovedadesOrdenView(APIView):
         orden = get_object_or_404(Orden, pk=pk)
         exigir_acceso_a_la_orden(request.user, orden)
         novedades = orden.novedades.select_related(
-            "prenda__tipo_prenda", "prenda__material", "creado_por", "foto"
+            "prenda__tipo_prenda", "prenda__material", "creado_por", "decidida_por", "foto"
         )
         return Response(NovedadSerializer(novedades, many=True).data)
 
@@ -462,7 +688,7 @@ class NovedadesOrdenView(APIView):
                 Novedad.Origen.PROCESO,
                 request.user,
             )
-        novedad = orden.novedades.select_related("creado_por", "foto").last()
+        novedad = orden.novedades.select_related("creado_por", "decidida_por", "foto").last()
         return Response(NovedadSerializer(novedad).data, status=status.HTTP_201_CREATED)
 
 
@@ -479,12 +705,57 @@ class OrdenesConNovedadView(generics.ListAPIView):
 
     def get_queryset(self):
         pendientes = Novedad.objects.pendientes().select_related(
-            "prenda__tipo_prenda", "prenda__material", "creado_por", "foto"
+            "prenda__tipo_prenda", "prenda__material", "creado_por", "decidida_por", "foto"
         )
         return (
             Orden.objects.filter(estado=Orden.Estado.CON_NOVEDAD)
             .select_related("cliente", "operario")
             .prefetch_related(Prefetch("novedades", pendientes, to_attr="novedades_pendientes"))
+        )
+
+
+ESTADOS_DE_NOVEDAD = ("pendiente", "resuelta")
+
+
+class HistorialNovedadesView(APIView):
+    """Todas las novedades, de la mas reciente a la mas antigua; siempre paginado."""
+
+    permission_classes = [AdministradorORecepcionista]
+
+    def get(self, request):
+        params = request.query_params
+        estado = opcion(params, "estado", ESTADOS_DE_NOVEDAD, "Usa pendiente o resuelta.")
+        origen = opcion(params, "origen", Novedad.Origen.values, "Ese origen no existe.")
+        decision = opcion(params, "decision", Novedad.Decision.values, "Esa decision no existe.")
+        gravedad = opcion(params, "gravedad", Novedad.Gravedad.values, "Esa gravedad no existe.")
+
+        # "Pendiente" es exactamente lo que muestra la bandeja: la regla vive en pendientes().
+        novedades = Novedad.objects.annotate(
+            pendiente=Exists(Novedad.objects.pendientes().filter(pk=OuterRef("pk"))),
+            tiene_foto=Exists(FotoNovedad.objects.filter(novedad=OuterRef("pk"))),
+        ).select_related("orden__cliente", "prenda__tipo_prenda", "prenda__material", "creado_por", "decidida_por")
+        filtradas = buscar_por_palabras(
+            novedades,
+            params.get("buscar", ""),
+            (
+                "orden__codigo",
+                "orden__cliente__nombre_completo",
+                "orden__cliente__documento",
+                "descripcion",
+                "prenda__tipo_prenda__nombre",
+            ),
+        )
+        if estado:
+            filtradas = filtradas.filter(pendiente=estado == "pendiente")
+        for campo, valor in (("origen", origen), ("decision", decision), ("gravedad", gravedad)):
+            if valor:
+                filtradas = filtradas.filter(**{campo: valor})
+        filtradas = filtrar_por_fecha(filtradas, params, "creado_en").order_by("-creado_en", "-id")
+        return respuesta_paginada(
+            filtradas,
+            params,
+            lambda pagina: HistorialNovedadSerializer(pagina, many=True).data,
+            anios=anios_de(Novedad.objects.all(), "creado_en"),
         )
 
 
@@ -560,9 +831,30 @@ class CambiosDescuentosNovedadView(APIView):
         )
 
 
-class DanosView(generics.ListAPIView):
+class DanosView(ListaPaginadaMixin, generics.ListAPIView):
+    """`estado` solo no pagina y deja lo pendiente primero, como antes; con buscar, fecha, pagina
+    o tamano responde paginado, del mas reciente al mas antiguo."""
+
     serializer_class = DanoPrendaSerializer
     permission_classes = [AdministradorORecepcionista]
+    parametros_de_lista = (*PAGINACION, *FECHA)
+    con_anios = "creado_en"
+
+    def filtrar_lista(self, danos, params):
+        opcion(params, "estado", DanoPrenda.Estado.values, "Ese estado no existe.")
+        danos = buscar_por_palabras(
+            danos,
+            params.get("buscar", ""),
+            (
+                "orden__codigo",
+                "orden__cliente__nombre_completo",
+                "prenda__tipo_prenda__nombre",
+                "operario__username",
+                "operario__first_name",
+                "operario__last_name",
+            ),
+        )
+        return filtrar_por_fecha(danos, params, "creado_en").order_by("-creado_en", "-id")
 
     def get_queryset(self):
         danos = DanoPrenda.objects.select_related(
@@ -613,3 +905,12 @@ class FotoDanoView(APIView):
     def get(self, request, pk):
         foto = get_object_or_404(FotoDano, dano=pk)
         return HttpResponse(base64.b64decode(foto.contenido), content_type=foto.tipo)
+
+
+class QuejaCreateView(generics.CreateAPIView):
+    """Publica: el cliente no tiene cuenta en el sistema."""
+
+    serializer_class = QuejaSerializer
+    permission_classes = [AllowAny]
+    throttle_classes = [ScopedRateThrottle]
+    throttle_scope = "pqrs"

@@ -3,8 +3,9 @@ from django.utils import timezone
 from rest_framework import generics, serializers
 
 from core.permissions import AdministradorORecepcionista
+from ordenes.comprobantes import generar_comprobante
 from ordenes.historial import operacion_sobre_orden, registrar_evento
-from ordenes.models import HistorialOrden, Orden
+from ordenes.models import Comprobante, HistorialOrden, Orden
 
 from .models import Pago
 from .serializers import PagoSerializer
@@ -62,3 +63,4 @@ class PagoListCreateView(generics.ListCreateAPIView):
                 f"{estado_anterior} → {orden.estado}: abono minimo alcanzado. "
                 f"Entrega estimada {orden.fecha_estimada_entrega}",
             )
+            generar_comprobante(orden, Comprobante.Tipo.ABONO)

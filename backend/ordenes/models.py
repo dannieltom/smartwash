@@ -202,6 +202,10 @@ class Orden(ModeloConAutoria):
     def total_pagado(self):
         if self.pk is None:
             return Decimal("0")
+        # Los listados lo anotan en la misma consulta para no hacer una suma por orden.
+        anotado = getattr(self, "total_pagado_anotado", None)
+        if anotado is not None:
+            return anotado
         return self.pagos.aggregate(total=Sum("monto"))["total"] or Decimal("0")
 
     def saldo_pendiente(self):
@@ -291,6 +295,15 @@ def clasificacion_por_consumo(cliente):
     else:
         calculada = Cliente.Clasificacion.OCASIONAL
     return max(cliente.clasificacion, calculada, key=RANGO_CLASIFICACION.index)
+
+
+# Lo que no esta en la bandeja del operario: sus "ordenes activas" son todas las demas.
+# Sin operario no hay "En espera"; se excluye igual por si un camino futuro lo permite.
+ESTADOS_FUERA_DE_BANDEJA = (
+    Orden.Estado.EN_ESPERA,
+    Orden.Estado.ENTREGADA,
+    Orden.Estado.CANCELADA,
+)
 
 
 class Prenda(ModeloConAutoria):
@@ -673,3 +686,87 @@ class FotoDano(FotoEnBase64):
 
     def __str__(self):
         return f"Foto de {self.dano}"
+
+
+MENSAJE_COMPROBANTE_INMUTABLE = "Un comprobante no se puede modificar ni eliminar."
+
+
+class ComprobanteQuerySet(models.QuerySet):
+    def update(self, **kwargs):
+        raise PermissionDenied(MENSAJE_COMPROBANTE_INMUTABLE)
+
+    def delete(self):
+        raise PermissionDenied(MENSAJE_COMPROBANTE_INMUTABLE)
+
+
+class Comprobante(models.Model):
+    """Comprobante digital de la orden (HU22): una copia congelada de lo que se le entrego al cliente.
+
+    No se crea a mano: se usa ordenes.comprobantes.generar_comprobante. Su contenido no se
+    recalcula al consultarlo, aunque despues cambien tarifas, descuentos o pagos.
+    """
+
+    class Tipo(models.TextChoices):
+        ABONO = "abono", "Comprobante de abono"
+        ENTREGA = "entrega", "Comprobante de entrega"
+
+    orden = models.ForeignKey(Orden, on_delete=models.PROTECT, related_name="comprobantes")
+    tipo = models.CharField(max_length=20, choices=Tipo.choices)
+    contenido = models.JSONField()
+    generado_en = models.DateTimeField(auto_now_add=True)
+
+    objects = ComprobanteQuerySet.as_manager()
+
+    class Meta:
+        ordering = ("generado_en", "id")
+        constraints = [
+            models.UniqueConstraint(fields=("orden", "tipo"), name="comprobante_unico_por_tipo"),
+        ]
+
+    def __str__(self):
+        return f"{self.orden.codigo} · {self.get_tipo_display()}"
+
+    def save(self, *args, **kwargs):
+        if not self._state.adding:
+            raise PermissionDenied(MENSAJE_COMPROBANTE_INMUTABLE)
+        kwargs["force_insert"] = True
+        super().save(*args, **kwargs)
+
+    def delete(self, *args, **kwargs):
+        raise PermissionDenied(MENSAJE_COMPROBANTE_INMUTABLE)
+
+
+class Queja(ModeloConAutoria):
+    """Solicitud que deja el cliente desde el formulario publico de PQRS.
+
+    Nace pendiente: la recepcionista la gestiona a mano. Solo la sugerencia puede
+    llegar sin orden.
+    """
+
+    class Tipo(models.TextChoices):
+        PETICION = "peticion", "Peticion"
+        QUEJA = "queja", "Queja"
+        RECLAMO = "reclamo", "Reclamo"
+        SUGERENCIA = "sugerencia", "Sugerencia"
+
+    class Estado(models.TextChoices):
+        PENDIENTE = "Pendiente", "Pendiente"
+
+    # Default queja: las filas anteriores a los cuatro tipos eran todas quejas.
+    tipo = models.CharField(max_length=20, choices=Tipo.choices, default=Tipo.QUEJA)
+    orden = models.ForeignKey(
+        Orden, on_delete=models.PROTECT, null=True, blank=True, related_name="quejas"
+    )
+    nombre = models.CharField(max_length=150)
+    documento = models.CharField(max_length=20)
+    correo = models.EmailField(max_length=150)
+    telefono = models.CharField(max_length=20, blank=True)
+    mensaje = models.TextField()
+    estado = models.CharField(max_length=20, choices=Estado.choices, default=Estado.PENDIENTE)
+
+    class Meta:
+        ordering = ("creado_en", "id")
+
+    def __str__(self):
+        orden = self.orden.codigo if self.orden_id else "sin orden"
+        return f"{self.get_tipo_display()} · {orden} · {self.nombre} · {self.get_estado_display()}"

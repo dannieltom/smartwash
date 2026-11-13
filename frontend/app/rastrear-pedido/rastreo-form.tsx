@@ -6,6 +6,7 @@ import { AlertaErrores } from "@/app/catalogo/errores";
 import { leerErroresApi, rastrearOrden, type SeguimientoOrden } from "@/lib/api";
 import { ClayBadge, ClayButton, ClayCard, ClayField, ClayInput } from "../components/ui/clay";
 import { COLOR_ESTADO } from "../ordenes/tabla-ordenes";
+import CalificarOrden from "./calificacion";
 import LineaTiempo, { fechaLarga, fechaYHora } from "./linea-tiempo";
 
 type Fallo = { titulo: string; mensaje: string };
@@ -36,7 +37,24 @@ function Aviso({ orden }: { orden: SeguimientoOrden }) {
   );
 }
 
-function Detalle({ orden }: { orden: SeguimientoOrden }) {
+export async function leerSeguimiento(response: Response): Promise<SeguimientoOrden> {
+  // Un backend anterior a la linea de tiempo no manda etapas ni eventos: se muestra sin ella.
+  const datos = (await response.json()) as Partial<SeguimientoOrden> & Pick<SeguimientoOrden, "codigo" | "estado">;
+  return {
+    fecha_estimada_entrega: null,
+    etapa_actual: null,
+    con_novedad: false,
+    cancelada: datos.estado === "Cancelada",
+    fecha_cancelacion: null,
+    calificacion: null,
+    ...datos,
+    etapas: datos.etapas ?? [],
+    eventos: datos.eventos ?? [],
+  };
+}
+
+/** `conCalificacion` en false cuando quien la muestra ya pinta el bloque de calificacion. */
+export function Detalle({ orden, conCalificacion = true }: { orden: SeguimientoOrden; conCalificacion?: boolean }) {
   const pendienteDeEntrega = !orden.cancelada && orden.estado !== "Entregada";
   return (
     <>
@@ -45,6 +63,9 @@ function Detalle({ orden }: { orden: SeguimientoOrden }) {
         <div className="mt-5">
           <LineaTiempo orden={orden} />
         </div>
+      )}
+      {conCalificacion && orden.estado === "Entregada" && (
+        <CalificarOrden codigo={orden.codigo} calificacion={orden.calificacion} />
       )}
       {pendienteDeEntrega && orden.fecha_estimada_entrega && (
         <p className="mt-5 text-sm text-(--sw-ink-soft)">
@@ -84,18 +105,7 @@ export default function RastreoForm() {
     setPending(false);
 
     if (response?.ok) {
-      // Un backend anterior a la linea de tiempo no manda etapas ni eventos: se muestra sin ella.
-      const datos = (await response.json()) as Partial<SeguimientoOrden> & Pick<SeguimientoOrden, "codigo" | "estado">;
-      setResultado({
-        fecha_estimada_entrega: null,
-        etapa_actual: null,
-        con_novedad: false,
-        cancelada: datos.estado === "Cancelada",
-        fecha_cancelacion: null,
-        ...datos,
-        etapas: datos.etapas ?? [],
-        eventos: datos.eventos ?? [],
-      });
+      setResultado(await leerSeguimiento(response));
     } else if (response?.status === 404) {
       const { detail } = await leerErroresApi(response);
       setFallo({

@@ -5,7 +5,7 @@ import { FECHA_LEGIBLE } from "@/lib/auditoria";
 import { formatCOP } from "@/lib/format";
 import { ClayBadge, ClayCard } from "../../components/ui/clay";
 
-const DECISION: Record<NonNullable<Novedad["decision"]>, string> = {
+export const DECISION: Record<NonNullable<Novedad["decision"]>, string> = {
   continuar: "Continuar igual",
   agregar_servicio: "Agregar servicio",
   reprocesar: "Reprocesar",
@@ -58,6 +58,9 @@ export default function NovedadesOrden({
                     Decision del cliente: {DECISION[n.decision]}
                     {Number(n.monto_descuento) > 0 &&
                       ` · ${n.gravedad ? `${n.gravedad} ` : ""}${Number(n.porcentaje_descuento)} % (− ${formatCOP(n.monto_descuento)})`}
+                    {n.decidida_por_nombre &&
+                      n.decidida_en &&
+                      ` · Decidió ${n.decidida_por_nombre} el ${FECHA_LEGIBLE.format(new Date(n.decidida_en))}`}
                   </ClayBadge>
                 ) : (
                   <ClayBadge color="peach">Pendiente de decision del cliente</ClayBadge>
