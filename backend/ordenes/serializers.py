@@ -27,6 +27,7 @@ from .models import (
     Orden,
     OrdenServicio,
     Prenda,
+    Queja,
 )
 
 Evento = HistorialOrden.TipoEvento
@@ -1207,3 +1208,52 @@ class PagoDanoSerializer(serializers.Serializer):
             "blank": "Indica como se le pago al cliente.",
         }
     )
+
+
+class QuejaSerializer(serializers.ModelSerializer):
+    # Mismos campos que envia el formulario publico de PQRS; por ahora solo se reciben quejas.
+    tipo = serializers.ChoiceField(
+        choices=[("queja", "Queja")],
+        write_only=True,
+        error_messages={"invalid_choice": "Por ahora solo se reciben quejas."},
+    )
+    codigo_orden = serializers.CharField(
+        write_only=True,
+        error_messages={
+            "required": "Indica el codigo de la orden.",
+            "blank": "Indica el codigo de la orden.",
+        },
+    )
+
+    class Meta:
+        model = Queja
+        fields = (
+            "id",
+            "tipo",
+            "codigo_orden",
+            "nombre",
+            "documento",
+            "correo",
+            "telefono",
+            "mensaje",
+            "estado",
+            "creado_en",
+        )
+        read_only_fields = ("id", "estado", "creado_en")
+
+    def validate_codigo_orden(self, codigo):
+        orden = Orden.objects.filter(codigo=codigo).first()
+        if orden is None:
+            raise serializers.ValidationError(
+                "No encontramos una orden con ese codigo. Revisa el comprobante."
+            )
+        if orden.estado != Orden.Estado.ENTREGADA:
+            raise serializers.ValidationError("La queja solo aplica a ordenes ya entregadas.")
+        return orden
+
+    def create(self, validated_data):
+        validated_data.pop("tipo")
+        queja = Queja(orden=validated_data.pop("codigo_orden"), **validated_data)
+        queja.registrar_autoria(self.context["request"].user)
+        queja.save()
+        return queja

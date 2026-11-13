@@ -36,6 +36,7 @@ from .models import (
     Orden,
     OrdenServicio,
     Prenda,
+    Queja,
 )
 
 User = get_user_model()
@@ -4375,3 +4376,72 @@ class ComprobanteInmutableTests(TestCase):
         with self.assertRaises(IntegrityError), transaction.atomic():
             Comprobante.objects.create(orden=self.orden, tipo=Comprobante.Tipo.ABONO, contenido={})
 
+
+class RegistrarQuejaApiTests(APITestCase):
+    def setUp(self):
+        self.orden = crear_orden(codigo="SW-ABCD2345")
+        Orden.objects.filter(pk=self.orden.pk).update(estado=Orden.Estado.ENTREGADA)
+
+    def enviar(self, **cambios):
+        datos = {
+            "tipo": "queja",
+            "codigo_orden": "SW-ABCD2345",
+            "nombre": "Ana Gomez",
+            "documento": "1090123456",
+            "correo": "ana@example.com",
+            "telefono": "3001112233",
+            "mensaje": "La camisa llego con una mancha.",
+        }
+        datos.update(cambios)
+        return self.client.post("/api/pqrs", datos, format="json")
+
+    def test_sin_sesion_registra_la_queja_de_una_orden_entregada_pendiente_de_gestion(self):
+        response = self.enviar()
+
+        self.assertEqual(response.status_code, 201, response.json())
+        self.assertEqual(response.json()["estado"], "Pendiente")
+        queja = Queja.objects.get()
+        self.assertEqual(queja.orden, self.orden)
+        self.assertEqual(queja.estado, Queja.Estado.PENDIENTE)
+        self.assertEqual(queja.mensaje, "La camisa llego con una mancha.")
+
+    def test_el_telefono_es_opcional(self):
+        self.assertEqual(self.enviar(telefono="").status_code, 201)
+
+    def test_rechaza_la_queja_de_una_orden_no_entregada(self):
+        for estado in Orden.Estado.values:
+            if estado == Orden.Estado.ENTREGADA:
+                continue
+            with self.subTest(estado=estado):
+                Orden.objects.filter(pk=self.orden.pk).update(estado=estado)
+
+                response = self.enviar()
+
+                self.assertEqual(response.status_code, 400)
+                self.assertIn("solo aplica a ordenes ya entregadas", str(response.json()))
+        self.assertFalse(Queja.objects.exists())
+
+    def test_rechaza_un_codigo_que_no_existe(self):
+        response = self.enviar(codigo_orden="SW-ZZZZ9999")
+
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("No encontramos una orden con ese codigo", str(response.json()))
+
+    def test_por_ahora_solo_recibe_quejas(self):
+        for tipo in ("peticion", "reclamo", "sugerencia"):
+            with self.subTest(tipo=tipo):
+                response = self.enviar(tipo=tipo)
+
+                self.assertEqual(response.status_code, 400)
+                self.assertIn("solo se reciben quejas", str(response.json()))
+        self.assertFalse(Queja.objects.exists())
+
+    def test_rechaza_datos_incompletos_sin_registrar_nada(self):
+        for campo in ("codigo_orden", "nombre", "documento", "correo", "mensaje"):
+            with self.subTest(campo=campo):
+                response = self.enviar(**{campo: ""})
+
+                self.assertEqual(response.status_code, 400)
+                self.assertIn(campo, response.json())
+        self.assertEqual(self.enviar(correo="no-es-correo").status_code, 400)
+        self.assertFalse(Queja.objects.exists())

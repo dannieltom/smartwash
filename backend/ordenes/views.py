@@ -67,6 +67,7 @@ from .serializers import (
     OrdenSerializer,
     PagoDanoSerializer,
     PrendaEntradaSerializer,
+    QuejaSerializer,
     agregar_prenda,
     agregar_servicio,
     asignar_operario,
@@ -717,3 +718,10 @@ class FotoDanoView(APIView):
     def get(self, request, pk):
         foto = get_object_or_404(FotoDano, dano=pk)
         return HttpResponse(base64.b64decode(foto.contenido), content_type=foto.tipo)
+
+
+class QuejaCreateView(generics.CreateAPIView):
+    """Publica: el cliente no tiene cuenta en el sistema."""
+
+    serializer_class = QuejaSerializer
+    permission_classes = [AllowAny]

@@ -730,3 +730,27 @@ class Comprobante(models.Model):
 
     def delete(self, *args, **kwargs):
         raise PermissionDenied(MENSAJE_COMPROBANTE_INMUTABLE)
+
+
+class Queja(ModeloConAutoria):
+    """Queja postventa que deja el cliente desde el formulario publico de PQRS.
+
+    Nace pendiente: la recepcionista la gestiona a mano.
+    """
+
+    class Estado(models.TextChoices):
+        PENDIENTE = "Pendiente", "Pendiente"
+
+    orden = models.ForeignKey(Orden, on_delete=models.PROTECT, related_name="quejas")
+    nombre = models.CharField(max_length=150)
+    documento = models.CharField(max_length=20)
+    correo = models.EmailField(max_length=150)
+    telefono = models.CharField(max_length=20, blank=True)
+    mensaje = models.TextField()
+    estado = models.CharField(max_length=20, choices=Estado.choices, default=Estado.PENDIENTE)
+
+    class Meta:
+        ordering = ("creado_en", "id")
+
+    def __str__(self):
+        return f"{self.orden.codigo} · {self.nombre} · {self.get_estado_display()}"
