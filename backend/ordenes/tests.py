@@ -22,6 +22,7 @@ from rest_framework.throttling import SimpleRateThrottle
 
 from catalogo.models import Material, NivelDificultad, Servicio, Tarifa, TipoPrenda, redondear_a_100
 from clientes.models import Cliente
+from core.pruebas import PruebasDeListaMixin
 from fidelizacion.models import ReglaDescuento
 from pagos.models import Pago
 from turnos.models import Turno
@@ -4906,3 +4907,66 @@ class ListaOrdenesPaginadaApiTests(APITestCase):
             self.con_prenda(self.orden())
         with self.assertNumQueries(11):
             self.assertEqual(len(self.listar(pagina=1).json()["resultados"]), 7)
+
+
+class ListaDanosPaginadaApiTests(PruebasDeListaMixin, APITestCase):
+    url = "/api/danos"
+    con_fecha = True
+    invalidos = ({"estado": "perdido", "pagina": "1"},)
+
+    def setUp(self):
+        self.client.force_authenticate(
+            User.objects.create_user(username="rita", password="x", rol=User.Rol.RECEPCIONISTA)
+        )
+        self.camisa = TipoPrenda.objects.create(nombre="Camisa")
+        self.numero = 0
+
+    def crear(self, cuando, tipo=None, cliente=None, operario=None, estado=DanoPrenda.Estado.PENDIENTE):
+        self.numero += 1
+        orden = crear_orden(codigo=f"SW-DAN{self.numero:05d}")
+        if cliente:
+            Orden.objects.filter(pk=orden.pk).update(cliente=cliente)
+        prenda = Prenda.objects.create(orden=orden, tipo_prenda=tipo or self.camisa)
+        dano = DanoPrenda.objects.create(
+            orden=orden,
+            prenda=prenda,
+            tipo=DanoPrenda.Tipo.DANO,
+            descripcion="Mancha",
+            valor_unitario_declarado=Decimal("1000"),
+            valor_declarado=Decimal("1000"),
+            valor_servicio=Decimal("1000"),
+            operario=operario,
+        )
+        DanoPrenda.objects.filter(pk=dano.pk).update(creado_en=cuando, estado=estado)
+        return dano
+
+    def test_busca_por_codigo_cliente_prenda_y_operario(self):
+        manana = timezone.now() + timedelta(days=1)
+        pedro = User.objects.create_user(username="pedro", first_name="Pedro", last_name="Diaz", password="x", rol=User.Rol.OPERARIO)
+        luis = Cliente.objects.create(documento="555", nombre_completo="Luis Perez", telefono="3")
+        de_pedro = self.crear(manana, operario=pedro)
+        de_luis = self.crear(manana, cliente=luis, tipo=TipoPrenda.objects.create(nombre="Pantalon"))
+
+        for texto, esperado in (
+            (de_pedro.orden.codigo.lower(), de_pedro),
+            ("perez", de_luis),
+            ("pantalon", de_luis),
+            ("DIAZ", de_pedro),
+            ("pedro camisa", de_pedro),
+        ):
+            with self.subTest(texto=texto):
+                self.assertEqual(self.claves(self.listar(buscar=texto)), [esperado.pk])
+
+    def test_el_estado_filtra_y_solo_no_pagina_como_antes(self):
+        manana = timezone.now() + timedelta(days=1)
+        pagado = self.crear(manana, estado=DanoPrenda.Estado.PAGADO)
+        pendiente = self.crear(manana - timedelta(hours=1))
+
+        self.assertEqual(self.claves(self.listar(estado="pagado", pagina=1)), [pagado.pk])
+        anterior = self.client.get(self.url, {"estado": "pendiente"}).json()
+        self.assertEqual([d["id"] for d in anterior], [pendiente.pk])
+
+    def test_el_operario_no_tiene_acceso(self):
+        self.client.force_authenticate(User.objects.create_user(username="pedro", password="x", rol=User.Rol.OPERARIO))
+
+        self.assertEqual(self.listar(pagina=1).status_code, 403)

@@ -23,6 +23,7 @@ from clientes.models import Cliente
 from core.listas import (
     FECHA,
     PAGINACION,
+    ListaPaginadaMixin,
     anios_de,
     buscar_por_palabras,
     filtrar_por_fecha,
@@ -779,9 +780,30 @@ class CambiosDescuentosNovedadView(APIView):
         )
 
 
-class DanosView(generics.ListAPIView):
+class DanosView(ListaPaginadaMixin, generics.ListAPIView):
+    """`estado` solo no pagina y deja lo pendiente primero, como antes; con buscar, fecha, pagina
+    o tamano responde paginado, del mas reciente al mas antiguo."""
+
     serializer_class = DanoPrendaSerializer
     permission_classes = [AdministradorORecepcionista]
+    parametros_de_lista = (*PAGINACION, *FECHA)
+    con_anios = "creado_en"
+
+    def filtrar_lista(self, danos, params):
+        opcion(params, "estado", DanoPrenda.Estado.values, "Ese estado no existe.")
+        danos = buscar_por_palabras(
+            danos,
+            params.get("buscar", ""),
+            (
+                "orden__codigo",
+                "orden__cliente__nombre_completo",
+                "prenda__tipo_prenda__nombre",
+                "operario__username",
+                "operario__first_name",
+                "operario__last_name",
+            ),
+        )
+        return filtrar_por_fecha(danos, params, "creado_en").order_by("-creado_en", "-id")
 
     def get_queryset(self):
         danos = DanoPrenda.objects.select_related(

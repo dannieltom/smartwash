@@ -946,14 +946,6 @@ export type DanoPrenda = {
   foto_url: string | null;
 };
 
-/** Administrador y recepcionista; el operario recibe 403. */
-export async function getDanos(
-  cookieStore: CookieStore,
-  estado?: DanoPrenda["estado"],
-): Promise<DanoPrenda[] | null> {
-  return fetchBackend<DanoPrenda[]>(estado ? `/danos?estado=${estado}` : "/danos", cookieStore);
-}
-
 /** Solo el administrador; la observacion (por ejemplo, el medio de pago) es obligatoria. */
 export async function pagarDano(id: number, observacion: string): Promise<Response> {
   return api(`/danos/${id}/pago`, { method: "POST", body: { observacion } });
