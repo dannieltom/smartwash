@@ -21,6 +21,7 @@ from rest_framework.test import APITestCase
 from catalogo.models import Material, NivelDificultad, Servicio, Tarifa, TipoPrenda, redondear_a_100
 from clientes.models import Cliente
 from fidelizacion.models import ReglaDescuento
+from turnos.models import Turno
 
 from .estimacion import calcular_fecha_estimada, horas_en_proceso, sumar_dias_habiles
 from .historial import OperacionNoCompletada, operacion_sobre_orden, registrar_evento
@@ -175,6 +176,12 @@ def crear_orden(codigo="ORD-0100"):
         defaults={"nombre_completo": "Ana Gomez", "telefono": "3001112233"},
     )
     return Orden.objects.create(codigo=codigo, cliente=cliente, recepcionista=recepcionista)
+
+
+def abrir_turno(*operarios):
+    """Desde HU10 solo se asigna a operarios en turno, y sin turno el operario no usa la API."""
+    for operario in operarios:
+        Turno.objects.create(operario=operario, inicio=timezone.now())
 
 
 class RegistrarEventoTests(TestCase):
@@ -954,6 +961,7 @@ class CambiarEstadoApiTests(CatalogoDePruebaMixin, APITestCase):
         self.registrar(self.prenda(self.planchado), self.prenda(self.lavado, color="rojo"))
         self.orden = Orden.objects.get()
         self.operario = User.objects.create_user(username="op", password="x", rol=User.Rol.OPERARIO)
+        abrir_turno(self.operario)
         self.otro_operario = User.objects.create_user(
             username="otro", password="x", rol=User.Rol.OPERARIO
         )
@@ -1118,6 +1126,7 @@ class AsignarOperarioApiTests(CatalogoDePruebaMixin, APITestCase):
         self.otro_operario = User.objects.create_user(
             username="op2", password="x", rol=User.Rol.OPERARIO, first_name="Marta"
         )
+        abrir_turno(self.operario, self.otro_operario)
         self.admin = User.objects.create_user(
             username="jefe", password="x", rol=User.Rol.ADMINISTRADOR
         )
@@ -1324,6 +1333,7 @@ class BandejaOperarioApiTests(CatalogoDePruebaMixin, APITestCase):
         self.otro_operario = User.objects.create_user(
             username="op2", password="x", rol=User.Rol.OPERARIO
         )
+        abrir_turno(self.operario, self.otro_operario)
 
     def orden_asignada(self, operario):
         self.client.force_authenticate(self.recepcionista)
@@ -1854,6 +1864,7 @@ class AlertasVencimientoApiTests(APITestCase):
         self.operario = User.objects.create_user(
             username="op", password="x", rol=User.Rol.OPERARIO
         )
+        abrir_turno(self.operario)
 
     def orden(self, codigo, estado, fecha, operario=None):
         orden = crear_orden(codigo=codigo)
@@ -1949,6 +1960,7 @@ class OrdenEnProcesoMixin(CatalogoDePruebaMixin):
         self.otro_operario = User.objects.create_user(
             username="op2", password="x", rol=User.Rol.OPERARIO
         )
+        abrir_turno(self.operario, self.otro_operario)
         self.client.force_authenticate(self.recepcionista)
         self.registrar(self.prenda(self.planchado), self.prenda(self.planchado))
         self.orden = Orden.objects.get()
@@ -2610,6 +2622,7 @@ class CancelarOrdenApiTests(CatalogoDePruebaMixin, APITestCase):
         self.operario = User.objects.create_user(
             username="op1", password="x", rol=User.Rol.OPERARIO, first_name="Luis"
         )
+        abrir_turno(self.operario)
         self.admin = User.objects.create_user(
             username="jefe", password="x", rol=User.Rol.ADMINISTRADOR
         )
@@ -2944,6 +2957,7 @@ class ConsultaPublicaApiTests(CatalogoDePruebaMixin, APITestCase):
         self.tarifa(self.camisa, self.planchado, "6000")
         self.tarifa(self.camisa, self.lavado, "4000")
         self.operario = User.objects.create_user(username="op", password="x", rol=User.Rol.OPERARIO)
+        abrir_turno(self.operario)
         admin = User.objects.create_user(username="admin", password="x", rol=User.Rol.ADMINISTRADOR)
         self.client.force_authenticate(admin)
         orden = self.en(hora(10, 8), "post", "/api/ordenes", {

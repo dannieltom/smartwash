@@ -3,7 +3,8 @@ from datetime import timedelta
 
 from django.conf import settings
 from django.db import transaction
-from django.db.models import F, Prefetch, Sum
+from django.db.models import Count, F, OuterRef, Prefetch, Subquery, Sum, Value
+from django.db.models.functions import Coalesce
 from django.http import HttpResponse
 from django.shortcuts import get_object_or_404
 from django.utils import timezone
@@ -24,11 +25,13 @@ from core.permissions import (
     SoloOperario,
 )
 from fidelizacion.models import puntos_por_consumo
+from turnos.services import esta_en_turno
 
 from .avisos import avisar_orden_lista
 from .comprobantes import generar_comprobante
 from .historial import operacion_sobre_orden, registrar_evento
 from .models import (
+    ESTADOS_FUERA_DE_BANDEJA,
     CambioConfiguracionDescuento,
     Comprobante,
     ConfiguracionDescuentoNovedad,
@@ -55,7 +58,8 @@ from .serializers import (
     HistorialOrdenSerializer,
     NovedadEntradaSerializer,
     NovedadSerializer,
-    OperarioSerializer,
+    OperarioConCargaSerializer,
+    nombre_usuario,
     OrdenAlertaSerializer,
     OrdenBandejaSerializer,
     OrdenConNovedadSerializer,
@@ -151,12 +155,7 @@ class OrdenDetailView(generics.RetrieveAPIView):
 class BandejaOperarioView(generics.ListAPIView):
     serializer_class = OrdenBandejaSerializer
     permission_classes = [SoloOperario]
-    # Sin operario no hay "En espera"; se excluye igual por si un camino futuro lo permite.
-    ESTADOS_FUERA_DE_BANDEJA = (
-        Orden.Estado.EN_ESPERA,
-        Orden.Estado.ENTREGADA,
-        Orden.Estado.CANCELADA,
-    )
+    ESTADOS_FUERA_DE_BANDEJA = ESTADOS_FUERA_DE_BANDEJA
 
     def get_queryset(self):
         # Una prenda danada o perdida ya no se procesa aunque la orden vuelva a proceso.
@@ -394,12 +393,101 @@ class AsignarOperarioView(APIView):
         return Response(OrdenSerializer(ordenes_con_detalle().get(pk=orden.pk)).data)
 
 
+def subconsulta_por_operario(queryset, agregado):
+    """El agregado por operario como subconsulta, para anotar a todos en una sola consulta."""
+    return Coalesce(
+        Subquery(queryset.order_by().values("operario_id").annotate(valor=agregado).values("valor")[:1]),
+        Value(0),
+    )
+
+
 class OperariosActivosView(generics.ListAPIView):
-    serializer_class = OperarioSerializer
+    """Los operarios activos con su carga. El recomendado es el de menos prendas entre los que estan en turno."""
+
+    serializer_class = OperarioConCargaSerializer
     permission_classes = [AdministradorORecepcionista]
 
     def get_queryset(self):
-        return operarios_activos().order_by("first_name", "last_name", "username")
+        activas = Orden.objects.filter(operario=OuterRef("pk")).exclude(estado__in=ESTADOS_FUERA_DE_BANDEJA)
+        prendas = Prenda.objects.filter(
+            orden__operario=OuterRef("pk"), dano__isnull=True
+        ).exclude(orden__estado__in=ESTADOS_FUERA_DE_BANDEJA).annotate(operario_id=F("orden__operario"))
+        return (
+            operarios_activos()
+            .annotate(
+                en_turno=esta_en_turno(),
+                ordenes_activas=subconsulta_por_operario(activas, Count("pk")),
+                prendas_activas=subconsulta_por_operario(prendas, Sum("cantidad")),
+            )
+            .order_by("first_name", "last_name", "username")
+        )
+
+    def list(self, request, *args, **kwargs):
+        operarios = list(self.get_queryset())
+        recomendado = min(
+            (o for o in operarios if o.en_turno),
+            key=lambda o: (o.prendas_activas, o.ordenes_activas, nombre_usuario(o).lower()),
+            default=None,
+        )
+        contexto = {**self.get_serializer_context(), "recomendado": recomendado.pk if recomendado else None}
+        return Response(self.get_serializer_class()(operarios, many=True, context=contexto).data)
+
+
+def prendas_agrupadas(prendas):
+    """Las prendas identicas en una linea, con la misma clave que frontend/app/ordenes/agrupar.ts."""
+    grupos = {}
+    for prenda in prendas:
+        servicios = sorted(linea.tarifa.servicio.nombre for linea in prenda.servicios.all())
+        clave = (
+            prenda.tipo_prenda.nombre,
+            prenda.material.nombre if prenda.material_id else None,
+            prenda.talla,
+            prenda.genero,
+            prenda.color,
+            prenda.estado_inicial,
+            None if prenda.peso is None else float(prenda.peso),
+            tuple(servicios),
+        )
+        grupo = grupos.setdefault(clave, {"cantidad": 0, "tipo_prenda": prenda.tipo_prenda.nombre, "servicios": servicios})
+        grupo["cantidad"] += prenda.cantidad
+    return list(grupos.values())
+
+
+class OrdenesDeOperarioView(APIView):
+    """Las ordenes activas de un operario, en el orden de su bandeja."""
+
+    permission_classes = [AdministradorORecepcionista]
+
+    def get(self, request, pk):
+        operario = get_object_or_404(User, pk=pk, rol=User.Rol.OPERARIO)
+        asignacion = HistorialOrden.objects.filter(
+            orden=OuterRef("pk"), tipo_evento__in=(Evento.ASIGNACION, Evento.REASIGNACION)
+        ).order_by("-fecha", "-id")
+        por_procesar = Prenda.objects.filter(dano__isnull=True).select_related("tipo_prenda", "material")
+        ordenes = (
+            Orden.objects.filter(operario=operario)
+            .exclude(estado__in=ESTADOS_FUERA_DE_BANDEJA)
+            .select_related("cliente")
+            .prefetch_related(Prefetch("prendas", por_procesar), "prendas__servicios__tarifa__servicio")
+            # La ultima asignacion de una orden que hoy es suya es la que se la dio a el.
+            .annotate(fecha_asignacion=Subquery(asignacion.values("fecha")[:1]))
+            .order_by("fecha_estimada_entrega", "creado_en")
+        )
+        fecha = serializers.DateTimeField().to_representation
+        return Response(
+            [
+                {
+                    "id": orden.id,
+                    "codigo": orden.codigo,
+                    "fecha_asignacion": fecha(orden.fecha_asignacion) if orden.fecha_asignacion else None,
+                    "cliente_nombre": orden.cliente.nombre_completo,
+                    "estado": orden.estado,
+                    "total_prendas": sum(prenda.cantidad for prenda in orden.prendas.all()),
+                    "prendas": prendas_agrupadas(orden.prendas.all()),
+                }
+                for orden in ordenes
+            ]
+        )
 
 
 class HistorialOrdenView(generics.ListAPIView):

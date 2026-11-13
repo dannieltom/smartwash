@@ -4,6 +4,7 @@ import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { useState, type ReactNode } from "react";
 
+import { RUTA_TURNO } from "@/lib/api";
 import { cx } from "@/lib/cx";
 import { Wordmark } from "./ui/clay";
 import ThemeToggle from "./theme-toggle";
@@ -59,7 +60,7 @@ export default function NavMenu({
           )}
         >
           <ul className="flex flex-col lg:flex-row lg:flex-wrap lg:gap-1">
-            {enlaces.map((enlace) => {
+            {(ruta === RUTA_TURNO ? [] : enlaces).map((enlace) => {
               const activo = enlace.href === ruta;
               return (
                 <li key={enlace.href} className="border-t border-(--sw-hairline) first:border-t-0 lg:border-0">

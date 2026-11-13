@@ -293,6 +293,15 @@ def clasificacion_por_consumo(cliente):
     return max(cliente.clasificacion, calculada, key=RANGO_CLASIFICACION.index)
 
 
+# Lo que no esta en la bandeja del operario: sus "ordenes activas" son todas las demas.
+# Sin operario no hay "En espera"; se excluye igual por si un camino futuro lo permite.
+ESTADOS_FUERA_DE_BANDEJA = (
+    Orden.Estado.EN_ESPERA,
+    Orden.Estado.ENTREGADA,
+    Orden.Estado.CANCELADA,
+)
+
+
 class Prenda(ModeloConAutoria):
     orden = models.ForeignKey(Orden, on_delete=models.CASCADE, related_name="prendas")
     tipo_prenda = models.ForeignKey(

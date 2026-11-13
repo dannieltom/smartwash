@@ -4,6 +4,8 @@
 // backend con el rewrite de next.config.ts, asi que la cookie de sesion viaja
 // sola. En el servidor hay que reenviar las cookies a mano.
 
+import { redirect } from "next/navigation";
+
 export type Rol = "administrador" | "recepcionista" | "operario";
 
 /** Lo que devuelve UserSerializer en el backend. */
@@ -14,7 +16,19 @@ export type User = {
   first_name: string;
   last_name: string;
   rol: Rol;
+  /** Solo para operarios: si tiene turno vigente (HU10). */
+  en_turno?: boolean;
 };
+
+/** El backend responde 403 con este codigo a un operario que no ha iniciado turno. */
+export const CODIGO_SIN_TURNO = "turno_no_iniciado";
+export const RUTA_TURNO = "/turno";
+
+async function esSinTurno(response: Response): Promise<boolean> {
+  if (response.status !== 403) return false;
+  const data: unknown = await response.clone().json().catch(() => null);
+  return typeof data === "object" && data !== null && "codigo" in data && data.codigo === CODIGO_SIN_TURNO;
+}
 
 type Metodo = "GET" | "POST" | "PUT" | "PATCH" | "DELETE";
 
@@ -54,11 +68,17 @@ export async function api(
     headers["X-CSRFToken"] = readCookie("csrftoken") ?? "";
   }
 
-  return fetch(`/api${path}`, {
+  const response = await fetch(`/api${path}`, {
     method,
     headers,
     body: body === undefined ? undefined : JSON.stringify(body),
   });
+  // El turno pudo terminar (o cerrarse solo a medianoche) con la pantalla abierta.
+  if (await esSinTurno(response)) {
+    // eslint-disable-next-line @next/next/no-location-assign-relative-destination -- fuera de un componente no hay router; la recarga descarta la pantalla que ya no se puede usar
+    window.location.href = RUTA_TURNO;
+  }
+  return response;
 }
 
 /** Errores de validacion de DRF por campo. `detail` llega en 403/404 y similares;
@@ -81,20 +101,28 @@ export async function leerErroresApi(response: Response): Promise<ErroresApi> {
  * Devuelve null tambien si el backend no responde. Sin esto, un Django caido
  * hace que fetch lance y la pagina entera falle con 500; asi el usuario cae en
  * /login, que al menos es una pantalla util.
+ *
+ * Un operario sin turno vigente va a /turno: es el unico punto que lo exige en
+ * las paginas. Solo /turno y la barra de navegacion lo leen con `permitirSinTurno`.
  */
 export async function getCurrentUser(
   cookieStore: CookieStore,
+  { permitirSinTurno = false }: { permitirSinTurno?: boolean } = {},
 ): Promise<User | null> {
   const backend = process.env.BACKEND_URL ?? "http://127.0.0.1:8000";
+  let usuario: User | null = null;
   try {
     const response = await fetch(`${backend}/api/auth/me`, {
       headers: { cookie: cookieStore.toString() },
       cache: "no-store",
     });
-    return response.ok ? ((await response.json()) as User) : null;
+    usuario = response.ok ? ((await response.json()) as User) : null;
   } catch {
     return null;
   }
+  // redirect() lanza: va fuera del try para que el catch no se lo trague.
+  if (usuario?.rol === "operario" && usuario.en_turno === false && !permitirSinTurno) redirect(RUTA_TURNO);
+  return usuario;
 }
 
 /** Cuentas sembradas para el selector "actuar como". Null si no aplica (prod). */
@@ -121,15 +149,17 @@ async function fetchBackend<T>(
   cookieStore: CookieStore,
 ): Promise<T | null> {
   const backend = process.env.BACKEND_URL ?? "http://127.0.0.1:8000";
+  let response: Response;
   try {
-    const response = await fetch(`${backend}/api${path}`, {
+    response = await fetch(`${backend}/api${path}`, {
       headers: { cookie: cookieStore.toString() },
       cache: "no-store",
     });
-    return response.ok ? ((await response.json()) as T) : null;
   } catch {
     return null;
   }
+  if (await esSinTurno(response)) redirect(RUTA_TURNO);
+  return response.ok ? ((await response.json().catch(() => null)) as T | null) : null;
 }
 
 /* ------------------------------- Clientes (HU05, app clientes) ------------------------------- */
@@ -771,10 +801,85 @@ export async function cambiarEstadoOrden(id: number, estado: EstadoOrden): Promi
 }
 
 /** Lo que devuelve OperarioSerializer. /operarios lista solo los activos. */
-export type Operario = { id: number; username: string; nombre: string };
+/** Operario activo con su carga (HU10): las mismas ordenes y prendas que ve en su bandeja.
+ * `recomendado` marca a lo sumo uno: el de menos prendas entre los que estan en turno. */
+export type Operario = {
+  id: number;
+  username: string;
+  nombre: string;
+  en_turno: boolean;
+  ordenes_activas: number;
+  prendas_activas: number;
+  recomendado: boolean;
+};
 
 export async function getOperarios(cookieStore: CookieStore): Promise<Operario[] | null> {
   return fetchBackend<Operario[]>("/operarios", cookieStore);
+}
+
+export type OrdenDeOperario = {
+  id: number;
+  codigo: string;
+  /** Ultima asignacion de la orden; null en ordenes asignadas antes de registrarse. */
+  fecha_asignacion: string | null;
+  cliente_nombre: string;
+  estado: EstadoOrden;
+  total_prendas: number;
+  prendas: { cantidad: number; tipo_prenda: string; servicios: string[] }[];
+};
+
+/** Las ordenes activas de un operario, para ver su carga antes de asignarle otra. */
+export async function getOrdenesDeOperario(id: number): Promise<OrdenDeOperario[] | null> {
+  const response = await api(`/operarios/${id}/ordenes`).catch(() => null);
+  return response?.ok ? ((await response.json()) as OrdenDeOperario[]) : null;
+}
+
+/* ------------------------------- Turnos de operario (HU10) ------------------------------- */
+
+export type EstadoTurno = { en_turno: boolean; inicio: string | null; ordenes_en_curso: number };
+
+export async function getTurnoActual(): Promise<EstadoTurno | null> {
+  const response = await api("/turnos/actual").catch(() => null);
+  return response?.ok ? ((await response.json()) as EstadoTurno) : null;
+}
+
+export async function iniciarTurno(): Promise<Response> {
+  return api("/turnos/iniciar", { method: "POST" });
+}
+
+export async function terminarTurno(): Promise<Response> {
+  return api("/turnos/terminar", { method: "POST" });
+}
+
+export type TurnoRegistrado = {
+  operario: number;
+  operario_nombre: string;
+  inicio: string;
+  fin: string | null;
+  cierre: "manual" | "automatico" | null;
+};
+
+export type EtapaDeTrabajo = {
+  operario: number;
+  operario_nombre: string;
+  orden: number;
+  orden_codigo: string;
+  cliente_nombre: string;
+  estado: "En proceso" | "Control de calidad";
+  inicio: string;
+  fin: string | null;
+};
+
+export type ActividadOperarios = { turnos: TurnoRegistrado[]; etapas: EtapaDeTrabajo[] };
+
+/** Solo el administrador. desde/hasta en ISO con zona; maximo 31 dias. */
+export async function getActividad(
+  cookieStore: CookieStore,
+  filtros: { desde: string; hasta: string; operario?: string },
+): Promise<ActividadOperarios | null> {
+  const params = new URLSearchParams({ desde: filtros.desde, hasta: filtros.hasta });
+  if (filtros.operario) params.set("operario", filtros.operario);
+  return fetchBackend<ActividadOperarios>(`/operarios/actividad?${params}`, cookieStore);
 }
 
 /** HU13: solo recepcionista o administrador, y antes de iniciar el servicio,
