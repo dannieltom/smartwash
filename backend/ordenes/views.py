@@ -4,7 +4,7 @@ from decimal import Decimal
 
 from django.conf import settings
 from django.db import transaction
-from django.db.models import Count, F, OuterRef, Prefetch, Subquery, Sum, Value
+from django.db.models import Count, Exists, F, OuterRef, Prefetch, Subquery, Sum, Value
 from django.db.models.functions import Coalesce
 from django.http import HttpResponse
 from django.shortcuts import get_object_or_404
@@ -74,6 +74,7 @@ from .serializers import (
     EntregaSerializer,
     HistorialOrdenSerializer,
     NovedadEntradaSerializer,
+    HistorialNovedadSerializer,
     NovedadSerializer,
     OperarioConCargaSerializer,
     nombre_usuario,
@@ -651,7 +652,7 @@ class NovedadesOrdenView(APIView):
         orden = get_object_or_404(Orden, pk=pk)
         exigir_acceso_a_la_orden(request.user, orden)
         novedades = orden.novedades.select_related(
-            "prenda__tipo_prenda", "prenda__material", "creado_por", "foto"
+            "prenda__tipo_prenda", "prenda__material", "creado_por", "decidida_por", "foto"
         )
         return Response(NovedadSerializer(novedades, many=True).data)
 
@@ -682,7 +683,7 @@ class NovedadesOrdenView(APIView):
                 Novedad.Origen.PROCESO,
                 request.user,
             )
-        novedad = orden.novedades.select_related("creado_por", "foto").last()
+        novedad = orden.novedades.select_related("creado_por", "decidida_por", "foto").last()
         return Response(NovedadSerializer(novedad).data, status=status.HTTP_201_CREATED)
 
 
@@ -699,12 +700,57 @@ class OrdenesConNovedadView(generics.ListAPIView):
 
     def get_queryset(self):
         pendientes = Novedad.objects.pendientes().select_related(
-            "prenda__tipo_prenda", "prenda__material", "creado_por", "foto"
+            "prenda__tipo_prenda", "prenda__material", "creado_por", "decidida_por", "foto"
         )
         return (
             Orden.objects.filter(estado=Orden.Estado.CON_NOVEDAD)
             .select_related("cliente", "operario")
             .prefetch_related(Prefetch("novedades", pendientes, to_attr="novedades_pendientes"))
+        )
+
+
+ESTADOS_DE_NOVEDAD = ("pendiente", "resuelta")
+
+
+class HistorialNovedadesView(APIView):
+    """Todas las novedades, de la mas reciente a la mas antigua; siempre paginado."""
+
+    permission_classes = [AdministradorORecepcionista]
+
+    def get(self, request):
+        params = request.query_params
+        estado = opcion(params, "estado", ESTADOS_DE_NOVEDAD, "Usa pendiente o resuelta.")
+        origen = opcion(params, "origen", Novedad.Origen.values, "Ese origen no existe.")
+        decision = opcion(params, "decision", Novedad.Decision.values, "Esa decision no existe.")
+        gravedad = opcion(params, "gravedad", Novedad.Gravedad.values, "Esa gravedad no existe.")
+
+        # "Pendiente" es exactamente lo que muestra la bandeja: la regla vive en pendientes().
+        novedades = Novedad.objects.annotate(
+            pendiente=Exists(Novedad.objects.pendientes().filter(pk=OuterRef("pk"))),
+            tiene_foto=Exists(FotoNovedad.objects.filter(novedad=OuterRef("pk"))),
+        ).select_related("orden__cliente", "prenda__tipo_prenda", "prenda__material", "creado_por", "decidida_por")
+        filtradas = buscar_por_palabras(
+            novedades,
+            params.get("buscar", ""),
+            (
+                "orden__codigo",
+                "orden__cliente__nombre_completo",
+                "orden__cliente__documento",
+                "descripcion",
+                "prenda__tipo_prenda__nombre",
+            ),
+        )
+        if estado:
+            filtradas = filtradas.filter(pendiente=estado == "pendiente")
+        for campo, valor in (("origen", origen), ("decision", decision), ("gravedad", gravedad)):
+            if valor:
+                filtradas = filtradas.filter(**{campo: valor})
+        filtradas = filtrar_por_fecha(filtradas, params, "creado_en").order_by("-creado_en", "-id")
+        return respuesta_paginada(
+            filtradas,
+            params,
+            lambda pagina: HistorialNovedadSerializer(pagina, many=True).data,
+            anios=anios_de(Novedad.objects.all(), "creado_en"),
         )
 
 

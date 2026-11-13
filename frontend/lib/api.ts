@@ -721,9 +721,38 @@ export type Novedad = {
   foto_url: string | null;
   decision: DecisionNovedad | null;
   decision_observacion: string;
+  decidida_por_nombre: string | null;
+  decidida_en: string | null;
   gravedad: Gravedad | "";
   porcentaje_descuento: string | null;
   monto_descuento: string;
+};
+
+/** GET /novedades (administrador y recepcionista): todas, la mas reciente primero. "pendiente" es
+ * lo mismo que muestra la bandeja de ordenes con novedad; lo demas, "resuelta". */
+export type NovedadHistorial = Pick<
+  Novedad,
+  | "id"
+  | "prenda_nombre"
+  | "descripcion"
+  | "origen"
+  | "origen_nombre"
+  | "creado_en"
+  | "foto_url"
+  | "decision"
+  | "decision_observacion"
+  | "decidida_por_nombre"
+  | "decidida_en"
+  | "gravedad"
+  | "porcentaje_descuento"
+  | "monto_descuento"
+> & {
+  orden_id: number;
+  orden_codigo: string;
+  cliente_nombre: string;
+  registrada_por: string | null;
+  estado: "pendiente" | "resuelta";
+  decision_nombre: string | null;
 };
 
 /** Las del proceso: continuar o agregar_servicio (reprocesar y no_continuar solo

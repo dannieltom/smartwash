@@ -4970,3 +4970,141 @@ class ListaDanosPaginadaApiTests(PruebasDeListaMixin, APITestCase):
         self.client.force_authenticate(User.objects.create_user(username="pedro", password="x", rol=User.Rol.OPERARIO))
 
         self.assertEqual(self.listar(pagina=1).status_code, 403)
+
+
+class HistorialNovedadesApiTests(PruebasDeListaMixin, APITestCase):
+    url = "/api/novedades"
+    con_fecha = True
+    invalidos = ({"estado": "abierta"}, {"origen": "mostrador"}, {"decision": "tirar"}, {"gravedad": "grave"})
+
+    def setUp(self):
+        self.recepcion = User.objects.create_user(
+            username="rita", first_name="Rita", last_name="Lopez", password="x", rol=User.Rol.RECEPCIONISTA
+        )
+        self.client.force_authenticate(self.recepcion)
+        self.camisa = TipoPrenda.objects.create(nombre="Camisa")
+        self.numero = 0
+
+    def crear(self, cuando, estado_orden=Orden.Estado.CON_NOVEDAD, decision=None, cliente=None, **campos):
+        self.numero += 1
+        orden = crear_orden(codigo=f"SW-NOV{self.numero:05d}")
+        Orden.objects.filter(pk=orden.pk).update(estado=estado_orden, **({"cliente": cliente} if cliente else {}))
+        prenda = Prenda.objects.create(orden=orden, tipo_prenda=campos.pop("tipo", self.camisa))
+        novedad = Novedad.objects.create(
+            orden=orden,
+            prenda=prenda,
+            descripcion=campos.pop("descripcion", "Mancha de tinta"),
+            origen=campos.pop("origen", Novedad.Origen.PROCESO),
+            estado_anterior=Orden.Estado.EN_PROCESO,
+            decision=decision,
+            **campos,
+        )
+        Novedad.objects.filter(pk=novedad.pk).update(creado_en=cuando)
+        return novedad
+
+    def test_sin_parametros_responde_la_lista_completa_como_antes(self):
+        self.crear_varios(2)
+
+        datos = self.listar().json()
+
+        self.assertEqual((datos["total"], datos["pagina"], len(datos["resultados"])), (2, 1, 2))
+
+    def test_pendiente_es_lo_mismo_que_muestra_la_bandeja(self):
+        manana = timezone.now() + timedelta(days=1)
+        sin_decidir = self.crear(manana)
+        retenida = self.crear(manana, decision=Novedad.Decision.NO_CONTINUAR)
+        cancelada = self.crear(manana, estado_orden=Orden.Estado.CANCELADA, decision=Novedad.Decision.NO_CONTINUAR)
+        continuada = self.crear(manana, estado_orden=Orden.Estado.EN_PROCESO, decision=Novedad.Decision.CONTINUAR)
+
+        estados = {r["id"]: r["estado"] for r in self.listar(pagina=1).json()["resultados"]}
+
+        self.assertEqual(
+            estados,
+            {sin_decidir.pk: "pendiente", retenida.pk: "pendiente", cancelada.pk: "resuelta", continuada.pk: "resuelta"},
+        )
+        self.assertEqual(sorted(self.claves(self.listar(estado="pendiente"))), sorted([sin_decidir.pk, retenida.pk]))
+        self.assertEqual(sorted(self.claves(self.listar(estado="resuelta"))), sorted([cancelada.pk, continuada.pk]))
+        bandeja = self.client.get("/api/ordenes/novedades").json()
+        self.assertEqual(
+            sorted(n["id"] for o in bandeja for n in o["novedades"]), sorted([sin_decidir.pk, retenida.pk])
+        )
+
+    def test_trae_quien_decidio_y_cuando_y_la_foto(self):
+        decidida_en = timezone.now()
+        novedad = self.crear(
+            timezone.now(),
+            estado_orden=Orden.Estado.ENTREGADA,
+            decision=Novedad.Decision.ENTREGAR_CON_DESCUENTO,
+            decidida_por=self.recepcion,
+            decidida_en=decidida_en,
+            decision_observacion="Acepto el descuento",
+            gravedad=Novedad.Gravedad.LEVE,
+            porcentaje_descuento=Decimal("10"),
+            monto_descuento=Decimal("1500"),
+        )
+        FotoNovedad.objects.create(novedad=novedad, contenido="aGVsbG8=", tipo="image/png", tamano=5)
+
+        datos = self.listar(pagina=1).json()["resultados"][0]
+
+        self.assertEqual(
+            set(datos),
+            {
+                "id", "orden_id", "orden_codigo", "cliente_nombre", "prenda_nombre", "descripcion", "origen",
+                "origen_nombre", "registrada_por", "creado_en", "foto_url", "estado", "decision", "decision_nombre",
+                "decision_observacion", "decidida_por_nombre", "decidida_en", "gravedad", "porcentaje_descuento",
+                "monto_descuento",
+            },
+        )
+        self.assertEqual(
+            (datos["orden_id"], datos["cliente_nombre"], datos["estado"], datos["decision_nombre"], datos["decidida_por_nombre"]),
+            (novedad.orden_id, "Ana Gomez", "resuelta", "Entregar con descuento", "Rita Lopez"),
+        )
+        self.assertEqual((datos["porcentaje_descuento"], datos["monto_descuento"]), ("10.00", "1500.00"))
+        self.assertEqual(datos["foto_url"], f"/api/novedades/{novedad.pk}/foto")
+        self.assertIsNotNone(datos["decidida_en"])
+        for usuario in (self.recepcion, User.objects.create_user(username="jefe", password="x", rol=User.Rol.ADMINISTRADOR)):
+            self.client.force_authenticate(usuario)
+            self.assertEqual(self.client.get(datos["foto_url"]).status_code, 200)
+
+    def test_el_detalle_de_la_orden_trae_quien_decidio(self):
+        novedad = self.crear(
+            timezone.now(), estado_orden=Orden.Estado.EN_PROCESO, decision=Novedad.Decision.CONTINUAR,
+            decidida_por=self.recepcion, decidida_en=timezone.now(),
+        )
+
+        datos = self.client.get(f"/api/ordenes/{novedad.orden_id}/novedades").json()[0]
+
+        self.assertEqual(datos["decidida_por_nombre"], "Rita Lopez")
+        self.assertIsNotNone(datos["decidida_en"])
+
+    def test_busca_por_codigo_cliente_cedula_descripcion_y_prenda(self):
+        manana = timezone.now() + timedelta(days=1)
+        luis = Cliente.objects.create(documento="88776655", nombre_completo="Luis Perez", telefono="3")
+        de_luis = self.crear(manana, cliente=luis, descripcion="Boton suelto", tipo=TipoPrenda.objects.create(nombre="Pantalon"))
+        otra = self.crear(manana)
+
+        for texto, esperada in (
+            (otra.orden.codigo.lower(), otra),
+            ("perez", de_luis),
+            ("887766", de_luis),
+            ("boton", de_luis),
+            ("PANTALON", de_luis),
+            ("ana tinta", otra),
+        ):
+            with self.subTest(texto=texto):
+                self.assertEqual(self.claves(self.listar(buscar=texto)), [esperada.pk])
+
+    def test_filtra_por_origen_decision_y_gravedad(self):
+        manana = timezone.now() + timedelta(days=1)
+        entrega = self.crear(manana, origen=Novedad.Origen.ENTREGA, estado_orden=Orden.Estado.ENTREGADA,
+                             decision=Novedad.Decision.ENTREGAR_CON_DESCUENTO, gravedad=Novedad.Gravedad.NOTORIA)
+        self.crear(manana)
+
+        self.assertEqual(self.claves(self.listar(origen="entrega")), [entrega.pk])
+        self.assertEqual(self.claves(self.listar(decision="entregar_con_descuento")), [entrega.pk])
+        self.assertEqual(self.claves(self.listar(gravedad="notoria")), [entrega.pk])
+
+    def test_el_operario_no_tiene_acceso(self):
+        self.client.force_authenticate(User.objects.create_user(username="pedro", password="x", rol=User.Rol.OPERARIO))
+
+        self.assertEqual(self.listar().status_code, 403)

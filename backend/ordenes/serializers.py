@@ -706,6 +706,7 @@ class NovedadSerializer(serializers.ModelSerializer):
     prenda_nombre = serializers.CharField(source="prenda.__str__", read_only=True)
     origen_nombre = serializers.CharField(source="get_origen_display", read_only=True)
     usuario_nombre = serializers.SerializerMethodField()
+    decidida_por_nombre = serializers.SerializerMethodField()
     foto_url = serializers.SerializerMethodField()
 
     class Meta:
@@ -724,6 +725,8 @@ class NovedadSerializer(serializers.ModelSerializer):
             "foto_url",
             "decision",
             "decision_observacion",
+            "decidida_por_nombre",
+            "decidida_en",
             "gravedad",
             "porcentaje_descuento",
             "monto_descuento",
@@ -733,10 +736,55 @@ class NovedadSerializer(serializers.ModelSerializer):
     def get_usuario_nombre(self, novedad) -> str | None:
         return nombre_usuario(novedad.creado_por) if novedad.creado_por else None
 
+    def get_decidida_por_nombre(self, novedad) -> str | None:
+        return nombre_usuario(novedad.decidida_por) if novedad.decidida_por else None
+
     def get_foto_url(self, novedad) -> str | None:
-        if not hasattr(novedad, "foto"):
+        # El historial anota tiene_foto para no traer el base64 de cada foto.
+        tiene_foto = getattr(novedad, "tiene_foto", None)
+        if not (hasattr(novedad, "foto") if tiene_foto is None else tiene_foto):
             return None
         return reverse("novedad-foto", args=[novedad.pk])
+
+
+class HistorialNovedadSerializer(NovedadSerializer):
+    orden_id = serializers.IntegerField(read_only=True)
+    orden_codigo = serializers.CharField(source="orden.codigo", read_only=True)
+    cliente_nombre = serializers.CharField(source="orden.cliente.nombre_completo", read_only=True)
+    registrada_por = serializers.SerializerMethodField()
+    estado = serializers.SerializerMethodField()
+    decision_nombre = serializers.CharField(source="get_decision_display", read_only=True, allow_null=True)
+
+    class Meta(NovedadSerializer.Meta):
+        fields = (
+            "id",
+            "orden_id",
+            "orden_codigo",
+            "cliente_nombre",
+            "prenda_nombre",
+            "descripcion",
+            "origen",
+            "origen_nombre",
+            "registrada_por",
+            "creado_en",
+            "foto_url",
+            "estado",
+            "decision",
+            "decision_nombre",
+            "decision_observacion",
+            "decidida_por_nombre",
+            "decidida_en",
+            "gravedad",
+            "porcentaje_descuento",
+            "monto_descuento",
+        )
+        read_only_fields = fields
+
+    def get_registrada_por(self, novedad) -> str | None:
+        return self.get_usuario_nombre(novedad)
+
+    def get_estado(self, novedad) -> str:
+        return "pendiente" if novedad.pendiente else "resuelta"
 
 
 class CancelacionSerializer(serializers.Serializer):
