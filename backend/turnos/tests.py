@@ -1,5 +1,6 @@
-from datetime import datetime, timedelta
+from datetime import datetime, time, timedelta
 from decimal import Decimal
+from unittest import mock
 from zoneinfo import ZoneInfo
 
 from django.core.exceptions import PermissionDenied
@@ -467,6 +468,11 @@ class ActividadTests(APITestCase):
     url = "/api/operarios/actividad"
 
     def setUp(self):
+        # El rango por defecto llega hasta "ahora": sin congelar el reloj, antes de las 10 la etapa de Ana no entra.
+        seis_de_la_tarde = datetime.combine(timezone.localdate(), time(18), tzinfo=BOGOTA)
+        reloj = mock.patch("django.utils.timezone.now", return_value=seis_de_la_tarde)
+        reloj.start()
+        self.addCleanup(reloj.stop)
         self.admin = User.objects.create_user(username="jefe", password="x", rol=User.Rol.ADMINISTRADOR)
         self.luis, self.ana = operario("luis", "Luis", turno=False), operario("ana", "Ana", turno=False)
         self.orden_1, self.orden_2, self.orden_3 = (crear_orden(codigo=f"SW-ORDEN00{i}") for i in (1, 2, 3))
