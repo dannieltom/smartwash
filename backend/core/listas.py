@@ -107,3 +107,30 @@ def respuesta_paginada(queryset, params, serializar, **extra):
             "resultados": serializar(resultados),
         }
     )
+
+
+class ListaPaginadaMixin:
+    """Para una ListAPIView: sin parametros de lista responde como siempre; con alguno, paginado.
+
+    Cada vista declara `parametros_de_lista` (los que activan la paginacion) y `filtrar_lista`,
+    que aplica sus filtros y el orden. `con_anios` agrega los anos de ese campo de fecha.
+    """
+
+    parametros_de_lista = PAGINACION
+    con_anios = None
+
+    def filtrar_lista(self, queryset, params):
+        return queryset
+
+    def list(self, request, *args, **kwargs):
+        params = request.query_params
+        if not pide_paginacion(params, self.parametros_de_lista):
+            return super().list(request, *args, **kwargs)
+        visibles = self.get_queryset()
+        extra = {"anios": anios_de(visibles, self.con_anios)} if self.con_anios else {}
+        return respuesta_paginada(
+            self.filtrar_lista(visibles, params),
+            params,
+            lambda pagina: self.get_serializer(pagina, many=True).data,
+            **extra,
+        )

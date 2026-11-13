@@ -178,10 +178,6 @@ export type Cliente = {
 
 export type ClienteFormulario = Omit<Cliente, "id" | "clasificacion" | "puntos">;
 
-export async function getClientes(cookieStore: CookieStore): Promise<Cliente[] | null> {
-  return fetchBackend<Cliente[]>("/clientes", cookieStore);
-}
-
 export async function getCliente(id: number, cookieStore: CookieStore): Promise<Cliente | null> {
   return fetchBackend<Cliente>(`/clientes/${id}`, cookieStore);
 }

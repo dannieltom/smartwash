@@ -29,6 +29,13 @@ export function useLista<F extends Filtros, T>({
   const pagina = paginaDesde(params);
   const consulta = consultaDeLista(filtros, pagina);
   const [cargado, setCargado] = useState<Cargado<T>>({ datos: inicial, consulta: consultaInicial });
+  const [inicialPrevio, setInicialPrevio] = useState(inicial);
+
+  // router.refresh() (p. ej. al guardar un registro) vuelve a pintar la pagina del servidor con datos nuevos.
+  if (inicial !== inicialPrevio) {
+    setInicialPrevio(inicial);
+    setCargado({ datos: inicial, consulta: consultaInicial });
+  }
 
   useEffect(() => {
     if (consulta === cargado.consulta) return;
