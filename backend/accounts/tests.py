@@ -11,6 +11,9 @@ from django.utils.encoding import force_bytes
 from django.utils.http import urlsafe_base64_encode
 from rest_framework.test import APIClient, APITestCase
 from django.test import override_settings
+from django.utils import timezone
+
+from core.pruebas import PruebasDeListaMixin
 
 from .models import RegistroAuditoria
 
@@ -599,3 +602,39 @@ class RecuperarPasswordTests(APITestCase):
         response = self.client.post(self.CONFIRMAR, {}, format="json")
         self.assertEqual(response.status_code, 400)
         self.assertEqual(set(response.json()), {"uid", "token", "password"})
+
+
+class ListaUsuariosPaginadaApiTests(PruebasDeListaMixin, APITestCase):
+    url = "/api/usuarios"
+    invalidos = ({"rol": "cliente"}, {"activo": "si"})
+
+    def setUp(self):
+        self.client.force_authenticate(
+            User.objects.create_user(username="jefe", password="x", rol=User.Rol.ADMINISTRADOR)
+        )
+        self.numero = 0
+
+    def crear(self, cuando, **campos):
+        self.numero += 1
+        usuario = User.objects.create_user(
+            username=campos.pop("username", f"usuario{self.numero}"), password="x", rol=campos.pop("rol", User.Rol.OPERARIO), **campos
+        )
+        User.objects.filter(pk=usuario.pk).update(date_joined=cuando)
+        return usuario
+
+    def test_busca_por_usuario_nombre_apellido_y_correo(self):
+        ana = self.crear(timezone.now(), username="arojas", first_name="Ana", last_name="Rojas", email="ana@sw.co")
+        luis = self.crear(timezone.now(), username="lperez", first_name="Luis", last_name="Perez", email="luis@sw.co")
+
+        for texto, esperado in (("AROJAS", ana), ("luis", luis), ("perez", luis), ("ana@sw", ana), ("ana rojas", ana)):
+            with self.subTest(texto=texto):
+                self.assertEqual(self.claves(self.listar(buscar=texto)), [esperado.pk])
+        self.assertEqual(self.claves(self.listar(buscar="ana perez")), [])
+
+    def test_filtra_por_rol_y_por_estado(self):
+        recepcion = self.crear(timezone.now(), rol=User.Rol.RECEPCIONISTA)
+        inactivo = self.crear(timezone.now(), is_active=False)
+
+        self.assertEqual(self.claves(self.listar(rol="recepcionista")), [recepcion.pk])
+        self.assertEqual(self.claves(self.listar(activo="false")), [inactivo.pk])
+        self.assertNotIn(inactivo.pk, self.claves(self.listar(activo="true")))

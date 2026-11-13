@@ -23,6 +23,7 @@ from rest_framework.throttling import ScopedRateThrottle, SimpleRateThrottle
 from rest_framework.views import APIView
 from drf_spectacular.utils import extend_schema  # <-- Importamos extend_schema
 
+from core.listas import PAGINACION, ListaPaginadaMixin, buscar_por_palabras, opcion
 from turnos.services import turno_vigente
 
 from .models import RegistroAuditoria, User
@@ -270,11 +271,27 @@ class ActuarComoView(APIView):
         return Response(UserSerializer(usuario).data)
 
 
-class UsuarioInternoListCreateView(generics.ListCreateAPIView):
+ACTIVO = {"true": True, "false": False}
+
+
+class UsuarioInternoListCreateView(ListaPaginadaMixin, generics.ListCreateAPIView):
     queryset = get_user_model().objects.all().order_by("username")
+    parametros_de_lista = (*PAGINACION, "rol", "activo")
 
     def get_serializer_class(self):
         return UsuarioAdminSerializer if self.request.method == "GET" else UsuarioInternoSerializer
+
+    def filtrar_lista(self, usuarios, params):
+        rol = opcion(params, "rol", User.Rol.values, "Ese rol no existe.")
+        activo = opcion(params, "activo", ACTIVO, "Usa true o false.")
+        usuarios = buscar_por_palabras(
+            usuarios, params.get("buscar", ""), ("username", "first_name", "last_name", "email")
+        )
+        if rol:
+            usuarios = usuarios.filter(rol=rol)
+        if activo:
+            usuarios = usuarios.filter(is_active=ACTIVO[activo])
+        return usuarios.order_by("-date_joined", "-id")
 
 
 class UsuarioInternoDetailView(generics.RetrieveUpdateAPIView):

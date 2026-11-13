@@ -231,10 +231,6 @@ export type UsuarioFormulario = {
   password?: string;
 };
 
-export async function getUsuarios(cookieStore: CookieStore): Promise<UsuarioAdmin[] | null> {
-  return fetchBackend<UsuarioAdmin[]>("/usuarios", cookieStore);
-}
-
 export async function getUsuario(
   id: number,
   cookieStore: CookieStore,
