@@ -147,10 +147,10 @@ export default function AsignarOperario({
     aviso = "No se pudo cargar la lista de operarios. Verifica que el backend este en ejecucion.";
   } else if (puedeAsignar && candidatos.length === 0) {
     aviso = "No hay otros operarios activos a quienes asignar la orden.";
-  } else if (puedeAsignar && !candidatos.some((o) => o.en_turno)) {
-    aviso = "Ningún operario está en turno.";
   }
   const ofrecerAsignar = puedeAsignar && aviso === null;
+  const hayAlguienEnTurno = (operarios ?? []).some((o) => o.en_turno);
+  const avisoTurno = puedeAsignar && candidatos.length > 0 && !hayAlguienEnTurno ? "Ningún operario está en turno." : null;
 
   return (
     <ClayCard className="mb-6">
@@ -167,6 +167,7 @@ export default function AsignarOperario({
       </div>
 
       {aviso && <p className="mt-3 text-sm text-(--sw-ink-soft)">{aviso}</p>}
+      {avisoTurno && <p className="mt-3 text-sm text-(--sw-ink-soft)">{avisoTurno}</p>}
 
       {editando && (
         <div className="mt-4 flex flex-col gap-3">
