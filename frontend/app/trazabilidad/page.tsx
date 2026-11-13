@@ -1,4 +1,5 @@
 import { cookies } from "next/headers";
+import Link from "next/link";
 import { redirect } from "next/navigation";
 
 import { getCurrentUser, getTrazabilidad, type TipoUsuarioAuditoria } from "@/lib/api";
@@ -34,6 +35,11 @@ export default async function TrazabilidadPage({
         Seguimiento a las acciones de cada tipo de usuario: administrador, recepcionista,
         operario y cliente.
       </Encabezado>
+      <p className="-mt-4 mb-6 text-sm">
+        <Link href="/trazabilidad/actividad" className="font-bold text-(--sw-accent-text) underline">
+          Ver la actividad de los operarios por etapa y turno
+        </Link>
+      </p>
 
       {acciones === null ? (
         <ClayCard>

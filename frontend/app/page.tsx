@@ -56,6 +56,13 @@ const ACCESOS = [
     color: "lavender" as const,
     roles: ["administrador"] as Rol[],
   },
+  {
+    href: "/trazabilidad/actividad",
+    titulo: "Actividad de operarios",
+    texto: "Que orden trabajaba cada operario en un rango de horas, y sus turnos.",
+    color: "blue" as const,
+    roles: ["administrador"] as Rol[],
+  },
 ];
 
 const FONDO_TARJETA = {
