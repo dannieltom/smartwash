@@ -120,6 +120,7 @@ REST_FRAMEWORK = {
         "recuperar-password-cuenta": "3/hour",
         "consulta-documento": "20/hour",
         "consulta-documento-cuenta": "10/hour",
+        "pqrs": "10/hour",
     },
 }
 

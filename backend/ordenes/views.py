@@ -791,3 +791,5 @@ class QuejaCreateView(generics.CreateAPIView):
 
     serializer_class = QuejaSerializer
     permission_classes = [AllowAny]
+    throttle_classes = [ScopedRateThrottle]
+    throttle_scope = "pqrs"

@@ -1026,8 +1026,13 @@ export async function consultarPorDocumento(documento: string, correo: string): 
 
 /* ------------------------------------- PQRS (EP06, publico) ------------------------------------- */
 
+export const TIPOS_PQRS = ["peticion", "queja", "reclamo", "sugerencia"] as const;
+export type TipoPqrs = (typeof TIPOS_PQRS)[number];
+
+/** POST /pqrs: el codigo de la orden es obligatorio salvo en la sugerencia, y la queja solo
+ * aplica a ordenes entregadas. Los errores llegan por campo (400) y el envio esta limitado (429). */
 export type PqrsFormulario = {
-  tipo: "peticion" | "queja" | "reclamo" | "sugerencia";
+  tipo: TipoPqrs;
   nombre: string;
   documento: string;
   correo: string;

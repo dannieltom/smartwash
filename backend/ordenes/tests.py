@@ -4005,6 +4005,33 @@ class MigracionValorUnitarioDeclaradoTests(TransactionTestCase):
         executor.migrate(self.ultima)
 
 
+
+class MigracionTipoDeQuejaTests(TransactionTestCase):
+    antes = [("ordenes", "0017_queja")]
+    despues = [("ordenes", "0018_queja_tipo_y_orden_opcional")]
+
+    def test_las_quejas_anteriores_quedan_como_queja(self):
+        executor = MigrationExecutor(connection)
+        executor.migrate(self.antes)
+        otras = [nodo for nodo in executor.loader.graph.leaf_nodes() if nodo[0] != "ordenes"]
+        apps = executor.loader.project_state(otras + self.antes).apps
+        recepcion = apps.get_model("accounts", "User").objects.create(username="r", rol="recepcionista")
+        cliente = apps.get_model("clientes", "Cliente").objects.create(
+            documento="1", nombre_completo="Pilar", telefono="3"
+        )
+        orden = apps.get_model("ordenes", "Orden").objects.create(
+            codigo="SW-VIEJA001", cliente=cliente, recepcionista=recepcion
+        )
+        apps.get_model("ordenes", "Queja").objects.create(
+            orden=orden, nombre="Pilar", documento="1", correo="p@x.co", mensaje="Mancha"
+        )
+
+        executor.loader.build_graph()
+        executor.migrate(self.despues)
+
+        queja = Queja.objects.get()
+        self.assertEqual((queja.tipo, queja.orden.codigo), (Queja.Tipo.QUEJA, "SW-VIEJA001"))
+
 BOGOTA = ZoneInfo("America/Bogota")
 
 
@@ -4381,6 +4408,7 @@ class ComprobanteInmutableTests(TestCase):
 
 class RegistrarQuejaApiTests(APITestCase):
     def setUp(self):
+        cache.clear()
         self.orden = crear_orden(codigo="SW-ABCD2345")
         Orden.objects.filter(pk=self.orden.pk).update(estado=Orden.Estado.ENTREGADA)
 
@@ -4429,14 +4457,62 @@ class RegistrarQuejaApiTests(APITestCase):
         self.assertEqual(response.status_code, 400)
         self.assertIn("No encontramos una orden con ese codigo", str(response.json()))
 
-    def test_por_ahora_solo_recibe_quejas(self):
-        for tipo in ("peticion", "reclamo", "sugerencia"):
+    def test_queja_peticion_y_reclamo_exigen_el_codigo_de_la_orden(self):
+        for tipo in ("queja", "peticion", "reclamo"):
             with self.subTest(tipo=tipo):
-                response = self.enviar(tipo=tipo)
+                response = self.enviar(tipo=tipo, codigo_orden="")
 
                 self.assertEqual(response.status_code, 400)
-                self.assertIn("solo se reciben quejas", str(response.json()))
+                self.assertEqual(response.json(), {"codigo_orden": ["Indica el codigo de la orden."]})
+        self.assertEqual(self.enviar(tipo="reclamo", codigo_orden=None).status_code, 400)
         self.assertFalse(Queja.objects.exists())
+
+    def test_la_sugerencia_no_necesita_codigo(self):
+        response = self.enviar(tipo="sugerencia", codigo_orden="")
+
+        self.assertEqual(response.status_code, 201, response.json())
+        queja = Queja.objects.get()
+        self.assertEqual((queja.tipo, queja.orden), (Queja.Tipo.SUGERENCIA, None))
+
+    def test_la_sugerencia_con_codigo_exige_que_la_orden_exista(self):
+        response = self.enviar(tipo="sugerencia", codigo_orden="SW-ZZZZ9999")
+
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("No encontramos una orden con ese codigo", str(response.json()))
+        Orden.objects.filter(pk=self.orden.pk).update(estado=Orden.Estado.EN_PROCESO)
+        self.assertEqual(self.enviar(tipo="sugerencia").status_code, 201)
+        self.assertEqual(Queja.objects.get().orden, self.orden)
+
+    def test_peticion_y_reclamo_aceptan_ordenes_no_entregadas(self):
+        Orden.objects.filter(pk=self.orden.pk).update(estado=Orden.Estado.EN_PROCESO)
+
+        for tipo in ("peticion", "reclamo"):
+            with self.subTest(tipo=tipo):
+                self.assertEqual(self.enviar(tipo=tipo).status_code, 201)
+        self.assertEqual(
+            sorted(Queja.objects.values_list("tipo", flat=True)), [Queja.Tipo.PETICION, Queja.Tipo.RECLAMO]
+        )
+
+    def test_guarda_el_tipo_de_solicitud(self):
+        self.enviar(tipo="queja")
+
+        self.assertEqual(Queja.objects.get().tipo, Queja.Tipo.QUEJA)
+
+    def test_rechaza_un_tipo_desconocido(self):
+        response = self.enviar(tipo="felicitacion")
+
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("tipo", response.json())
+
+    def test_limita_los_envios_por_ip(self):
+        with mock.patch.dict(SimpleRateThrottle.THROTTLE_RATES, {"pqrs": "2/hour"}):
+            self.enviar()
+            self.enviar(tipo="sugerencia")
+
+            response = self.enviar()
+
+        self.assertEqual(response.status_code, 429)
+        self.assertEqual(Queja.objects.count(), 2)
 
     def test_rechaza_datos_incompletos_sin_registrar_nada(self):
         for campo in ("codigo_orden", "nombre", "documento", "correo", "mensaje"):

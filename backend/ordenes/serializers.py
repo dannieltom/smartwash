@@ -1225,20 +1225,17 @@ class PagoDanoSerializer(serializers.Serializer):
     )
 
 
+MENSAJE_SIN_CODIGO = "Indica el codigo de la orden."
+
+
 class QuejaSerializer(serializers.ModelSerializer):
-    # Mismos campos que envia el formulario publico de PQRS; por ahora solo se reciben quejas.
+    # Mismos campos que envia el formulario publico de PQRS.
     tipo = serializers.ChoiceField(
-        choices=[("queja", "Queja")],
+        choices=Queja.Tipo.choices,
         write_only=True,
-        error_messages={"invalid_choice": "Por ahora solo se reciben quejas."},
+        error_messages={"invalid_choice": "Elige peticion, queja, reclamo o sugerencia."},
     )
-    codigo_orden = serializers.CharField(
-        write_only=True,
-        error_messages={
-            "required": "Indica el codigo de la orden.",
-            "blank": "Indica el codigo de la orden.",
-        },
-    )
+    codigo_orden = serializers.CharField(write_only=True, required=False, allow_blank=True)
 
     class Meta:
         model = Queja
@@ -1256,19 +1253,28 @@ class QuejaSerializer(serializers.ModelSerializer):
         )
         read_only_fields = ("id", "estado", "creado_en")
 
-    def validate_codigo_orden(self, codigo):
+    def validate(self, datos):
+        codigo = datos.pop("codigo_orden", "").strip()
+        tipo = datos["tipo"]
+        if not codigo:
+            if tipo != Queja.Tipo.SUGERENCIA:
+                raise serializers.ValidationError({"codigo_orden": MENSAJE_SIN_CODIGO})
+            datos["orden"] = None
+            return datos
         orden = Orden.objects.filter(codigo=codigo).first()
         if orden is None:
             raise serializers.ValidationError(
-                "No encontramos una orden con ese codigo. Revisa el comprobante."
+                {"codigo_orden": "No encontramos una orden con ese codigo. Revisa el comprobante."}
             )
-        if orden.estado != Orden.Estado.ENTREGADA:
-            raise serializers.ValidationError("La queja solo aplica a ordenes ya entregadas.")
-        return orden
+        if tipo == Queja.Tipo.QUEJA and orden.estado != Orden.Estado.ENTREGADA:
+            raise serializers.ValidationError(
+                {"codigo_orden": "La queja solo aplica a ordenes ya entregadas."}
+            )
+        datos["orden"] = orden
+        return datos
 
     def create(self, validated_data):
-        validated_data.pop("tipo")
-        queja = Queja(orden=validated_data.pop("codigo_orden"), **validated_data)
+        queja = Queja(**validated_data)
         queja.registrar_autoria(self.context["request"].user)
         queja.save()
         return queja
