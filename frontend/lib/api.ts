@@ -290,14 +290,6 @@ export type AccionAuditoria = {
   fecha: string;
 };
 
-export async function getTrazabilidad(
-  cookieStore: CookieStore,
-  tipoUsuario?: TipoUsuarioAuditoria,
-): Promise<AccionAuditoria[] | null> {
-  const query = tipoUsuario ? `?rol=${encodeURIComponent(tipoUsuario)}` : "";
-  return fetchBackend<AccionAuditoria[]>(`/usuarios/trazabilidad${query}`, cookieStore);
-}
-
 /* --------------------------- Catalogo de servicios y tarifas (HU07) --------------------------- */
 
 export type TipoPrenda = { id: number; nombre: string; peso_estandar: string | null };

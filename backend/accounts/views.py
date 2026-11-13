@@ -23,7 +23,7 @@ from rest_framework.throttling import ScopedRateThrottle, SimpleRateThrottle
 from rest_framework.views import APIView
 from drf_spectacular.utils import extend_schema  # <-- Importamos extend_schema
 
-from core.listas import PAGINACION, ListaPaginadaMixin, buscar_por_palabras, opcion
+from core.listas import FECHA, PAGINACION, ListaPaginadaMixin, buscar_por_palabras, filtrar_por_fecha, opcion
 from turnos.services import turno_vigente
 
 from .models import RegistroAuditoria, User
@@ -335,8 +335,20 @@ class HistorialUsuarioView(generics.ListAPIView):
         return RegistroAuditoria.objects.filter(usuario_id=self.kwargs["pk"])
 
 
-class TrazabilidadView(generics.ListAPIView):
+class TrazabilidadView(ListaPaginadaMixin, generics.ListAPIView):
+    """`rol` solo no pagina, como antes; con buscar, fecha, pagina o tamano responde paginado."""
+
     serializer_class = AccionAuditoriaSerializer
+    parametros_de_lista = (*PAGINACION, *FECHA)
+    con_anios = "fecha"
+
+    def filtrar_lista(self, registros, params):
+        registros = buscar_por_palabras(
+            registros,
+            params.get("buscar", ""),
+            ("detalle", "usuario_nombre", "usuario__username", "usuario__first_name", "usuario__last_name"),
+        )
+        return filtrar_por_fecha(registros, params, "fecha").order_by("-fecha", "-id")
 
     def get_queryset(self):
         queryset = RegistroAuditoria.objects.all()

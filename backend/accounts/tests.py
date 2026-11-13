@@ -638,3 +638,44 @@ class ListaUsuariosPaginadaApiTests(PruebasDeListaMixin, APITestCase):
         self.assertEqual(self.claves(self.listar(rol="recepcionista")), [recepcion.pk])
         self.assertEqual(self.claves(self.listar(activo="false")), [inactivo.pk])
         self.assertNotIn(inactivo.pk, self.claves(self.listar(activo="true")))
+
+
+class ListaTrazabilidadPaginadaApiTests(PruebasDeListaMixin, APITestCase):
+    url = "/api/usuarios/trazabilidad"
+    con_fecha = True
+
+    def setUp(self):
+        self.client.force_authenticate(
+            User.objects.create_user(username="jefe", password="x", rol=User.Rol.ADMINISTRADOR)
+        )
+
+    def crear(self, cuando, usuario=None, detalle="Cambio de prueba", tipo_usuario=User.Rol.OPERARIO):
+        registro = RegistroAuditoria.objects.create(
+            usuario=usuario,
+            usuario_nombre=usuario.username if usuario else "anonimo",
+            tipo_usuario=tipo_usuario,
+            accion=RegistroAuditoria.Accion.EDITADO,
+            detalle=detalle,
+        )
+        RegistroAuditoria.objects.filter(pk=registro.pk).update(fecha=cuando)
+        return registro
+
+    def test_busca_en_el_detalle_y_en_el_usuario(self):
+        ana = User.objects.create_user(username="arojas", first_name="Ana", last_name="Rojas", password="x")
+        cambio = self.crear(timezone.now() + timedelta(days=1), usuario=ana, detalle="Cambio el telefono")
+        otro = self.crear(timezone.now() + timedelta(days=1), detalle="Desactivo una cuenta")
+
+        de_ana = list(RegistroAuditoria.objects.filter(usuario=ana).order_by("-fecha", "-id").values_list("pk", flat=True))
+
+        self.assertEqual(self.claves(self.listar(buscar="telefono")), [cambio.pk])
+        self.assertEqual(self.claves(self.listar(buscar="cuenta")), [otro.pk])
+        for texto in ("AROJAS", "rojas", "ana rojas"):
+            with self.subTest(texto=texto):
+                self.assertEqual(self.claves(self.listar(buscar=texto)), de_ana)
+        self.assertEqual(self.claves(self.listar(buscar="ana cuenta")), [])
+
+    def test_conserva_el_filtro_por_tipo_de_usuario(self):
+        recepcion = self.crear(timezone.now() + timedelta(days=1), tipo_usuario=User.Rol.RECEPCIONISTA)
+
+        self.assertIsInstance(self.client.get(self.url, {"rol": "recepcionista"}).json(), list)
+        self.assertEqual(self.claves(self.listar(rol="recepcionista", pagina=1)), [recepcion.pk])
