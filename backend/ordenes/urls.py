@@ -20,6 +20,7 @@ from .views import (
     HistorialOrdenView,
     NovedadesOrdenView,
     OperariosActivosView,
+    OrdenesDeOperarioView,
     OrdenDetailView,
     OrdenListCreateView,
     OrdenesConNovedadView,
@@ -59,6 +60,7 @@ urlpatterns = [
     ),
     path("novedades/<int:pk>/foto", FotoNovedadView.as_view(), name="novedad-foto"),
     path("operarios", OperariosActivosView.as_view(), name="operarios-activos"),
+    path("operarios/<int:pk>/ordenes", OrdenesDeOperarioView.as_view(), name="operario-ordenes"),
     path(
         "ordenes/descuentos-novedad", DescuentosNovedadView.as_view(), name="descuentos-novedad"
     ),

@@ -12,6 +12,7 @@ from accounts.models import User
 from catalogo.models import Material, Servicio, Tarifa, TipoPrenda
 from catalogo.precios import calcular_precio
 from clientes.models import Cliente
+from turnos.services import turno_vigente
 
 from .estimacion import calcular_fecha_estimada, transiciones
 from .historial import operacion_sobre_orden, registrar_evento
@@ -327,6 +328,28 @@ class OperarioSerializer(serializers.ModelSerializer):
         return nombre_usuario(usuario)
 
 
+class OperarioConCargaSerializer(OperarioSerializer):
+    """El operario con lo que tiene en su bandeja, para elegir a quien asignar."""
+
+    en_turno = serializers.BooleanField(read_only=True)
+    ordenes_activas = serializers.IntegerField(read_only=True)
+    prendas_activas = serializers.IntegerField(read_only=True)
+    recomendado = serializers.SerializerMethodField()
+
+    class Meta(OperarioSerializer.Meta):
+        fields = (*OperarioSerializer.Meta.fields, "en_turno", "ordenes_activas", "prendas_activas", "recomendado")
+
+    def get_recomendado(self, operario) -> bool:
+        return operario.pk == self.context.get("recomendado")
+
+
+def exigir_en_turno(operario):
+    if turno_vigente(operario) is None:
+        raise serializers.ValidationError(
+            {"operario": f"{nombre_usuario(operario)} no está en turno. Asígnala a un operario en turno."}
+        )
+
+
 class AsignacionSerializer(serializers.Serializer):
     # Un id de otro rol, inactivo o inexistente recibe el mismo mensaje: la
     # respuesta no revela que cuentas existen.
@@ -375,6 +398,8 @@ def asignar_operario(orden, operario, usuario):
         raise serializers.ValidationError(
             {"estado": f'La orden esta "{orden.estado}"; no se puede asignar ni reasignar.'}
         )
+
+    exigir_en_turno(operario)
 
     orden.operario = operario
     orden.registrar_autoria(usuario)
@@ -530,6 +555,9 @@ def aplicar_descuento(novedad, porcentaje, configuracion, gravedad=""):
 def operario_para_reproceso(orden, elegido):
     """Por defecto vuelve al mismo operario; otro solo si se elige o si el original no esta activo."""
     if elegido is not None:
+        # Elegir de nuevo al mismo operario es la opcion por defecto: no se le exige turno.
+        if elegido != orden.operario:
+            exigir_en_turno(elegido)
         return elegido
     if orden.operario is None or not orden.operario.is_active:
         raise serializers.ValidationError(
