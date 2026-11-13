@@ -14,6 +14,7 @@ import {
 import { formatCOP } from "@/lib/format";
 import { ClayBadge, ClayButton, ClayCard, ClayField, ClayInput } from "../components/ui/clay";
 import { COLOR_ESTADO } from "../ordenes/tabla-ordenes";
+import CalificarOrden from "./calificacion";
 import { Detalle, leerSeguimiento } from "./rastreo-form";
 
 type Fallo = { titulo: string; mensaje: string };
@@ -61,9 +62,12 @@ function TarjetaOrden({ orden }: { orden: OrdenDeCliente }) {
             {seguimiento === "error" && (
               <p className="mt-3 text-sm text-(--sw-ink)">No pudimos cargar el seguimiento. Intenta de nuevo.</p>
             )}
-            {typeof seguimiento === "object" && seguimiento !== null && <Detalle orden={seguimiento} />}
+            {typeof seguimiento === "object" && seguimiento !== null && (
+              <Detalle orden={seguimiento} conCalificacion={false} />
+            )}
           </div>
         )}
+        {orden.estado === "Entregada" && <CalificarOrden codigo={orden.codigo} calificacion={orden.calificacion} />}
       </ClayCard>
     </li>
   );

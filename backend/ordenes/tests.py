@@ -2932,6 +2932,7 @@ class ConsultaPublicaApiTests(CatalogoDePruebaMixin, APITestCase):
                 "cancelada",
                 "fecha_cancelacion",
                 "eventos",
+                "calificacion",
             },
         )
         pago = next(e for e in datos["etapas"] if e["etapa"] == "Pagada")
@@ -4591,7 +4592,7 @@ class ConsultaPorDocumentoApiTests(CatalogoDePruebaMixin, APITestCase):
 
         self.assertEqual(set(datos), {"activas", "historial"})
         orden = datos["activas"][0]
-        self.assertEqual(set(orden), {"codigo", "estado", "total", "prendas"})
+        self.assertEqual(set(orden), {"codigo", "estado", "total", "prendas", "calificacion"})
         self.assertEqual(set(orden["prendas"][0]), {"cantidad", "tipo_prenda", "servicios"})
         texto = str(datos)
         for privado in ("Ana Gomez", "1090123456", "ana@example.com", "3001112233", "recepcion"):

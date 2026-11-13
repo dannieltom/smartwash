@@ -21,6 +21,7 @@ import {
 } from "@/lib/api";
 import { formatCOP, formatFecha } from "@/lib/format";
 import { BadgeClasificacion } from "../../clientes/clasificacion";
+import { Estrellas } from "../../components/estrellas";
 import { ClayBadge, ClayCard, Encabezado } from "../../components/ui/clay";
 import EstadoAbono from "../abono";
 import { tarifasDeHoy } from "../cotizacion";
@@ -202,6 +203,17 @@ export default async function OrdenPage({
       </ClayCard>
 
       {puedeEditar && <PagosOrden orden={orden} pagos={pagos} />}
+
+      {orden.calificacion && (
+        <ClayCard className="mb-6">
+          <p className="text-sm font-bold text-(--sw-ink)">
+            Calificación del cliente: <Estrellas estrellas={orden.calificacion.estrellas} />
+          </p>
+          {orden.calificacion.comentario && (
+            <p className="mt-2 text-sm text-(--sw-ink-soft)">“{orden.calificacion.comentario}”</p>
+          )}
+        </ClayCard>
+      )}
 
       <h2 className="mb-3 text-lg font-bold text-(--sw-ink)">Prendas</h2>
       <div className="flex flex-col gap-3">

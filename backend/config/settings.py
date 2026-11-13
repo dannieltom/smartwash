@@ -52,6 +52,7 @@ INSTALLED_APPS = [
     "fidelizacion",
     "pagos",
     "turnos",
+    "satisfaccion",
     # drf
     "drf_spectacular",
 ]
@@ -121,6 +122,8 @@ REST_FRAMEWORK = {
         "consulta-documento": "20/hour",
         "consulta-documento-cuenta": "10/hour",
         "pqrs": "10/hour",
+        "calificar-orden": "20/hour",
+        "calificar-orden-codigo": "5/hour",
     },
 }
 

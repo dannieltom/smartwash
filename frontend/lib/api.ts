@@ -546,6 +546,8 @@ export type Orden = {
   /** Lo pagado de mas por los descuentos; se devuelve al entregar. */
   saldo_a_favor: string;
   motivo_cancelacion: string;
+  /** Satisfaccion del cliente (EP06), o null si no la ha dado. */
+  calificacion: CalificacionPublica | null;
 };
 
 /** Una linea de prenda tal como la recibe POST /ordenes y POST /ordenes/{id}/prendas. */
@@ -1000,6 +1002,7 @@ export type SeguimientoOrden = {
   fecha_cancelacion: string | null;
   /** Cambios en orden cronologico, con una etiqueta publica (p. ej. "Volvio a proceso"). */
   eventos: { etiqueta: string; fecha: string }[];
+  calificacion: CalificacionPublica | null;
 };
 
 export async function rastrearOrden(codigo: string): Promise<Response> {
@@ -1013,6 +1016,8 @@ export type OrdenDeCliente = {
   estado: EstadoOrden;
   total: number;
   prendas: { cantidad: number; tipo_prenda: string; servicios: string[] }[];
+  /** Solo las estrellas: el comentario se ve al abrir el seguimiento. */
+  calificacion: { estrellas: number } | null;
 };
 
 /** Activas: todo lo que no esta Entregada ni Cancelada. Ambas listas, de la mas reciente a la mas antigua. */
@@ -1022,6 +1027,47 @@ export type OrdenesDeCliente = { activas: OrdenDeCliente[]; historial: OrdenDeCl
  * responde el mismo 404, y el backend limita los intentos (429). */
 export async function consultarPorDocumento(documento: string, correo: string): Promise<Response> {
   return api("/ordenes/consulta-por-documento", { method: "POST", body: { documento, correo } });
+}
+
+/* --------------------------------- Satisfaccion (EP06) --------------------------------- */
+
+export type CalificacionPublica = { estrellas: number; comentario: string };
+
+/** Publico: solo una orden Entregada, una sola vez. 400 con `detail` si no se puede, 404 si el
+ * codigo no existe y 429 si se superan los intentos. */
+export async function calificarOrden(codigo: string, estrellas: number, comentario: string): Promise<Response> {
+  return api(`/ordenes/consulta/${encodeURIComponent(codigo)}/calificacion`, {
+    method: "POST",
+    body: { estrellas, comentario },
+  });
+}
+
+export type CalificacionRegistrada = {
+  orden_id: number;
+  orden_codigo: string;
+  cliente_nombre: string;
+  estrellas: number;
+  comentario: string;
+  creada_en: string;
+};
+
+/** GET /calificaciones (administrador y recepcionista): `promedio` con un decimal, null si no hay. */
+export type ResumenCalificaciones = {
+  promedio: number | null;
+  total: number;
+  calificaciones: CalificacionRegistrada[];
+};
+
+/** desde/hasta: AAAA-MM-DD (hasta incluye el dia completo) o fecha y hora ISO; ambos opcionales. */
+export async function getCalificaciones(
+  cookieStore: CookieStore,
+  filtros: { desde?: string; hasta?: string } = {},
+): Promise<ResumenCalificaciones | null> {
+  const params = new URLSearchParams();
+  if (filtros.desde) params.set("desde", filtros.desde);
+  if (filtros.hasta) params.set("hasta", filtros.hasta);
+  const consulta = params.size ? `?${params}` : "";
+  return fetchBackend<ResumenCalificaciones>(`/calificaciones${consulta}`, cookieStore);
 }
 
 /* ------------------------------------- PQRS (EP06, publico) ------------------------------------- */

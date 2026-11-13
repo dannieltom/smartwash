@@ -75,6 +75,7 @@ from .serializers import (
     agregar_prenda,
     agregar_servicio,
     asignar_operario,
+    calificacion_de,
     exigir_orden_editable,
     guardar_recalculo,
     nombre_usuario,
@@ -91,7 +92,7 @@ Evento = HistorialOrden.TipoEvento
 
 
 def ordenes_con_detalle():
-    return Orden.objects.select_related("cliente").prefetch_related(
+    return Orden.objects.select_related("cliente", "calificacion").prefetch_related(
         "prendas__tipo_prenda",
         "prendas__material",
         "prendas__servicios__tarifa__servicio",
@@ -141,13 +142,16 @@ class AlertasVencimientoView(generics.ListAPIView):
         return ordenes.select_related("cliente").order_by("fecha_estimada_entrega", "creado_en")
 
 
+MENSAJE_CODIGO_NO_ENCONTRADO = "No encontramos una orden con ese codigo. Revisa el comprobante."
+
+
 class ConsultaPublicaView(APIView):
     permission_classes = [AllowAny]
 
     def get(self, request, codigo):
-        orden = Orden.objects.filter(codigo=codigo).first()
+        orden = Orden.objects.select_related("calificacion").filter(codigo=codigo).first()
         if orden is None:
-            raise NotFound("No encontramos una orden con ese codigo. Revisa el comprobante.")
+            raise NotFound(MENSAJE_CODIGO_NO_ENCONTRADO)
         return Response(ConsultaPublicaSerializer(orden).data)
 
 
@@ -168,11 +172,13 @@ class ConsultaPorDocumentoThrottle(SimpleRateThrottle):
 
 
 def resumen_publico(orden):
+    calificacion = calificacion_de(orden)
     return {
         "codigo": orden.codigo,
         "estado": orden.estado,
         "total": pesos(orden.valor_total),
         "prendas": prendas_agrupadas(orden.prendas.all()),
+        "calificacion": {"estrellas": calificacion.estrellas} if calificacion else None,
     }
 
 
@@ -199,7 +205,8 @@ class ConsultaPorDocumentoView(APIView):
             raise NotFound(MENSAJE_SIN_PEDIDOS)
 
         ordenes = (
-            cliente.ordenes.prefetch_related(
+            cliente.ordenes.select_related("calificacion")
+            .prefetch_related(
                 Prefetch("prendas", Prenda.objects.filter(dano__isnull=True).select_related("tipo_prenda", "material")),
                 "prendas__servicios__tarifa__servicio",
             )

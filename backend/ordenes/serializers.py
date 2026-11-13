@@ -293,6 +293,7 @@ class OrdenSerializer(serializers.ModelSerializer):
             tiene_abono=orden.tiene_abono(),
             pago_completo=pagado >= orden.valor_total,
             saldo_a_favor=f"{orden.saldo_a_favor():.2f}",
+            calificacion=calificacion_publica(orden),
         )
         return datos
 
@@ -996,6 +997,18 @@ def eventos_publicos(cambios):
     return eventos
 
 
+def calificacion_de(orden):
+    """La calificacion de satisfaccion de la orden, o None si el cliente no la ha dado."""
+    return getattr(orden, "calificacion", None)
+
+
+def calificacion_publica(orden):
+    calificacion = calificacion_de(orden)
+    if calificacion is None:
+        return None
+    return {"estrellas": calificacion.estrellas, "comentario": calificacion.comentario}
+
+
 class ConsultaPublicaSerializer(serializers.ModelSerializer):
     """Publica: solo codigo, estado, etapas y fechas; sin cliente, usuarios, montos, motivos ni ids."""
 
@@ -1059,6 +1072,7 @@ class ConsultaPublicaSerializer(serializers.ModelSerializer):
                 {"etiqueta": etiqueta, "fecha": fecha(momento)}
                 for etiqueta, momento in eventos_publicos(cambios)
             ],
+            calificacion=calificacion_publica(orden),
         )
         return datos
 
