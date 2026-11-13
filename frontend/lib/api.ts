@@ -563,8 +563,50 @@ export type PrendaFormulario = {
   servicios: number[];
 };
 
-export async function getOrdenes(cookieStore: CookieStore): Promise<Orden[] | null> {
-  return fetchBackend<Orden[]>("/ordenes", cookieStore);
+/** Filtros de la lista de ordenes tal como viajan en la URL (?buscar=...&pagina=2). */
+export type FiltrosOrdenes = {
+  buscar: string;
+  estado: string;
+  anio: string;
+  mes: string;
+  dia: string;
+  pagina: number;
+};
+
+export const ORDENES_POR_PAGINA = 20;
+
+/** GET /ordenes con filtros: la mas reciente primero. `anios` son los anos con ordenes visibles
+ * para el usuario, para el selector de ano. */
+export type PaginaOrdenes = {
+  total: number;
+  pagina: number;
+  paginas: number;
+  tamano: number;
+  anios: number[];
+  resultados: Orden[];
+};
+
+/** Solo los filtros con valor; `pagina` y `tamano` van siempre para recibir la respuesta paginada. */
+export function consultaDeOrdenes(filtros: FiltrosOrdenes): string {
+  const params = new URLSearchParams();
+  for (const clave of ["buscar", "estado", "anio", "mes", "dia"] as const) {
+    const valor = filtros[clave].trim();
+    if (valor) params.set(clave, valor);
+  }
+  params.set("pagina", String(filtros.pagina));
+  params.set("tamano", String(ORDENES_POR_PAGINA));
+  return params.toString();
+}
+
+export async function getOrdenesPagina(
+  cookieStore: CookieStore,
+  filtros: FiltrosOrdenes,
+): Promise<PaginaOrdenes | null> {
+  return fetchBackend<PaginaOrdenes>(`/ordenes?${consultaDeOrdenes(filtros)}`, cookieStore);
+}
+
+export async function buscarOrdenes(filtros: FiltrosOrdenes): Promise<Response> {
+  return api(`/ordenes?${consultaDeOrdenes(filtros)}`);
 }
 
 export type TipoEventoOrden =

@@ -1,76 +1,12 @@
 import { cookies } from "next/headers";
 import Link from "next/link";
 
-import { getCurrentUser, type Rol } from "@/lib/api";
+import { getCurrentUser } from "@/lib/api";
 import { Landing } from "./components/landing";
+import { modulosDe } from "./components/modulos";
 import { ClayCard, Encabezado } from "./components/ui/clay";
 import LogoutButton from "./logout-button";
 
-const ACCESOS = [
-  {
-    href: "/clientes",
-    titulo: "Clientes",
-    texto: "Registra y edita los datos de tus clientes.",
-    color: "blue" as const,
-    roles: ["administrador", "recepcionista"] as Rol[],
-  },
-  {
-    href: "/usuarios",
-    titulo: "Usuarios",
-    texto: "Crea, edita y desactiva cuentas internas.",
-    color: "lavender" as const,
-    roles: ["administrador"] as Rol[],
-  },
-  {
-    href: "/catalogo",
-    titulo: "Catalogo",
-    texto: "Servicios y tarifas por tipo de prenda.",
-    color: "mint" as const,
-    roles: ["administrador", "recepcionista"] as Rol[],
-  },
-  {
-    href: "/fidelizacion",
-    titulo: "Fidelizacion",
-    texto: "Reglas de descuento para tus clientes.",
-    color: "peach" as const,
-    roles: ["administrador"] as Rol[],
-  },
-  {
-    href: "/ordenes",
-    titulo: "Ordenes",
-    texto: "Sigue el estado de las ordenes en curso.",
-    color: "blue" as const,
-    roles: ["administrador", "recepcionista", "operario"] as Rol[],
-  },
-  {
-    href: "/ordenes/bandeja",
-    titulo: "Mi bandeja",
-    texto: "Las ordenes que tienes asignadas y aun no se entregan.",
-    color: "mint" as const,
-    roles: ["operario"] as Rol[],
-  },
-  {
-    href: "/trazabilidad",
-    titulo: "Trazabilidad",
-    texto: "Seguimiento a las acciones de todos los usuarios, por tipo.",
-    color: "lavender" as const,
-    roles: ["administrador"] as Rol[],
-  },
-  {
-    href: "/trazabilidad/actividad",
-    titulo: "Actividad de operarios",
-    texto: "Que orden trabajaba cada operario en un rango de horas, y sus turnos.",
-    color: "blue" as const,
-    roles: ["administrador"] as Rol[],
-  },
-  {
-    href: "/calificaciones",
-    titulo: "Calificaciones",
-    texto: "Que tan satisfechos quedan los clientes: promedio y comentarios por orden.",
-    color: "mint" as const,
-    roles: ["administrador", "recepcionista"] as Rol[],
-  },
-];
 
 const FONDO_TARJETA = {
   blue: "bg-(--sw-blue-pastel)",
@@ -83,7 +19,7 @@ export default async function HomePage() {
   const user = await getCurrentUser(await cookies());
   if (!user) return <Landing />;
 
-  const accesos = ACCESOS.filter((acceso) => acceso.roles.includes(user.rol));
+  const accesos = modulosDe(user.rol);
 
   return (
     <main className="mx-auto max-w-6xl px-4 py-8 sm:px-8 sm:py-12">

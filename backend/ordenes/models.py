@@ -202,6 +202,10 @@ class Orden(ModeloConAutoria):
     def total_pagado(self):
         if self.pk is None:
             return Decimal("0")
+        # Los listados lo anotan en la misma consulta para no hacer una suma por orden.
+        anotado = getattr(self, "total_pagado_anotado", None)
+        if anotado is not None:
+            return anotado
         return self.pagos.aggregate(total=Sum("monto"))["total"] or Decimal("0")
 
     def saldo_pendiente(self):

@@ -1,9 +1,10 @@
 import { cookies } from "next/headers";
 import Link from "next/link";
 
-import { getCurrentUser, type Rol } from "@/lib/api";
+import { getCurrentUser } from "@/lib/api";
 import { clayBtnClass } from "./ui/clay";
 import ActuarComoSelector from "./actuar-como";
+import { modulosDe } from "./modulos";
 import NavMenu, { type Enlace } from "./nav-menu";
 import TerminarTurno from "./terminar-turno";
 
@@ -17,42 +18,11 @@ const PUBLICOS: Enlace[] = [
   { href: "/pqrs", label: "PQRS" },
 ];
 
-const POR_ROL: Record<Rol, Enlace[]> = {
-  administrador: [
-    { href: "/clientes", label: "Clientes" },
-    { href: "/usuarios", label: "Usuarios" },
-    { href: "/catalogo", label: "Catalogo" },
-    { href: "/fidelizacion", label: "Fidelizacion" },
-    { href: "/ordenes", label: "Ordenes" },
-    { href: "/ordenes/alertas", label: "Alertas" },
-    { href: "/ordenes/novedades", label: "Novedades" },
-    { href: "/danos", label: "Danos" },
-    { href: "/ordenes/descuentos", label: "Descuentos" },
-    { href: "/trazabilidad", label: "Trazabilidad" },
-    { href: "/trazabilidad/actividad", label: "Actividad" },
-    { href: "/calificaciones", label: "Calificaciones" },
-  ],
-  recepcionista: [
-    { href: "/clientes", label: "Clientes" },
-    { href: "/catalogo", label: "Catalogo" },
-    { href: "/ordenes", label: "Ordenes" },
-    { href: "/ordenes/alertas", label: "Alertas" },
-    { href: "/ordenes/novedades", label: "Novedades" },
-    { href: "/danos", label: "Danos" },
-    { href: "/calificaciones", label: "Calificaciones" },
-  ],
-  operario: [
-    { href: "/ordenes/bandeja", label: "Mi bandeja" },
-    { href: "/ordenes", label: "Ordenes" },
-    { href: "/ordenes/alertas", label: "Alertas" },
-  ],
-};
-
 export default async function NavBar() {
   // La barra se pinta tambien en /turno: no puede mandar ahi al operario sin turno. Como el
   // layout no se repinta al navegar, lo que depende del turno lo decide NavMenu con la ruta.
   const user = await getCurrentUser(await cookies(), { permitirSinTurno: true });
-  const enlaces = user ? POR_ROL[user.rol] : PUBLICOS;
+  const enlaces = user ? modulosDe(user.rol).map(({ href, etiqueta }) => ({ href, label: etiqueta })) : PUBLICOS;
 
   return (
     <NavMenu enlaces={enlaces}>
