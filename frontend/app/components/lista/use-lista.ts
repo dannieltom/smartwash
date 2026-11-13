@@ -7,13 +7,13 @@ import { buscarPagina, consultaDeLista, type Filtros, type Pagina } from "@/lib/
 import { paginaDesde, urlDeLista, type Lector } from "./url";
 
 /** Lo ultimo que se cargo y para que consulta: si la URL pide otra, se esta cargando. */
-type Cargado<T> = { datos: Pagina<T> | null; consulta: string };
+type Cargado<R> = { datos: R | null; consulta: string };
 
 /**
  * Filtros y pagina viven en la URL (refrescar, compartir y volver atras los conservan); la lista se
  * vuelve a pedir a `ruta` cada vez que cambian. `inicial` es lo que ya trajo la pagina del servidor.
  */
-export function useLista<F extends Filtros, T>({
+export function useLista<F extends Filtros, T, R extends Pagina<T> = Pagina<T>>({
   ruta,
   leer,
   inicial,
@@ -21,14 +21,15 @@ export function useLista<F extends Filtros, T>({
 }: {
   ruta: string;
   leer: (params: Lector) => F;
-  inicial: Pagina<T> | null;
+  /** Lo que ya trajo la pagina del servidor; R permite respuestas con datos extra (p. ej. el promedio). */
+  inicial: R | null;
   consultaInicial: string;
 }) {
   const params = useSearchParams();
   const filtros = leer(params);
   const pagina = paginaDesde(params);
   const consulta = consultaDeLista(filtros, pagina);
-  const [cargado, setCargado] = useState<Cargado<T>>({ datos: inicial, consulta: consultaInicial });
+  const [cargado, setCargado] = useState<Cargado<R>>({ datos: inicial, consulta: consultaInicial });
   const [inicialPrevio, setInicialPrevio] = useState(inicial);
 
   // router.refresh() (p. ej. al guardar un registro) vuelve a pintar la pagina del servidor con datos nuevos.
@@ -41,7 +42,7 @@ export function useLista<F extends Filtros, T>({
     if (consulta === cargado.consulta) return;
     const controlador = { cancelado: false };
     buscarPagina(ruta, consulta)
-      .then(async (response) => (response.ok ? ((await response.json()) as Pagina<T>) : null))
+      .then(async (response) => (response.ok ? ((await response.json()) as R) : null))
       .catch(() => null)
       .then((datos) => {
         if (!controlador.cancelado) setCargado({ datos, consulta });

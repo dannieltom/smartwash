@@ -1,6 +1,7 @@
-from django.db.models import ProtectedError
+from django.db.models import F, ProtectedError
 from rest_framework import generics, serializers
 
+from core.listas import ListaPaginadaMixin, buscar_por_palabras
 from core.permissions import SoloAdministradorEscribe
 
 from .models import Material, NivelDificultad, Servicio, Tarifa, TipoPrenda
@@ -69,11 +70,21 @@ class MaterialDetailView(generics.RetrieveUpdateAPIView):
     serializer_class = MaterialSerializer
 
 
-class TarifaListCreateView(generics.ListCreateAPIView):
-    """Con ?vigentes=1 devuelve solo las tarifas que se usan para cotizar."""
+class TarifaListCreateView(ListaPaginadaMixin, generics.ListCreateAPIView):
+    """Con ?vigentes=1 devuelve solo las tarifas que se usan para cotizar.
+
+    Paginada conserva el orden por servicio y tipo de prenda: agrupada es como se lee la tabla.
+    """
 
     permission_classes = [SoloAdministradorEscribe]
     serializer_class = TarifaSerializer
+
+    def filtrar_lista(self, tarifas, params):
+        tarifas = buscar_por_palabras(tarifas, params.get("buscar", ""), ("servicio__nombre", "tipo_prenda__nombre"))
+        # La general (sin tipo) primero tambien en PostgreSQL, que ordena los nulos al final.
+        return tarifas.order_by(
+            "servicio__nombre", F("tipo_prenda__nombre").asc(nulls_first=True), "-vigente_desde", "id"
+        )
 
     def get_queryset(self):
         tarifas = Tarifa.objects.select_related("tipo_prenda", "servicio")

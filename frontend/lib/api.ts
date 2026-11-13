@@ -576,8 +576,13 @@ export function consultaDeLista(filtros: Filtros, pagina: number, tamano = POR_P
   return params.toString();
 }
 
-export async function getPagina<T>(cookieStore: CookieStore, ruta: string, consulta: string): Promise<Pagina<T> | null> {
-  return fetchBackend<Pagina<T>>(`${ruta}?${consulta}`, cookieStore);
+/** R permite respuestas paginadas con datos extra, como el promedio de las calificaciones. */
+export async function getPagina<T, R extends Pagina<T> = Pagina<T>>(
+  cookieStore: CookieStore,
+  ruta: string,
+  consulta: string,
+): Promise<R | null> {
+  return fetchBackend<R>(`${ruta}?${consulta}`, cookieStore);
 }
 
 export async function buscarPagina(ruta: string, consulta: string): Promise<Response> {
@@ -657,10 +662,6 @@ export type AlertaOrden = {
 
 /** Ordenes retrasadas o proximas a vencer (HU16). Al operario el backend le
  * devuelve solo las suyas. */
-export async function getAlertasOrdenes(cookieStore: CookieStore): Promise<AlertaOrden[] | null> {
-  return fetchBackend<AlertaOrden[]>("/ordenes/alertas", cookieStore);
-}
-
 export async function crearOrden(cliente: number, prendas: PrendaFormulario[]): Promise<Response> {
   return api("/ordenes", { method: "POST", body: { cliente, prendas } });
 }
@@ -1090,23 +1091,9 @@ export type CalificacionRegistrada = {
 };
 
 /** GET /calificaciones (administrador y recepcionista): `promedio` con un decimal, null si no hay. */
-export type ResumenCalificaciones = {
-  promedio: number | null;
-  total: number;
-  calificaciones: CalificacionRegistrada[];
-};
-
-/** desde/hasta: AAAA-MM-DD (hasta incluye el dia completo) o fecha y hora ISO; ambos opcionales. */
-export async function getCalificaciones(
-  cookieStore: CookieStore,
-  filtros: { desde?: string; hasta?: string } = {},
-): Promise<ResumenCalificaciones | null> {
-  const params = new URLSearchParams();
-  if (filtros.desde) params.set("desde", filtros.desde);
-  if (filtros.hasta) params.set("hasta", filtros.hasta);
-  const consulta = params.size ? `?${params}` : "";
-  return fetchBackend<ResumenCalificaciones>(`/calificaciones${consulta}`, cookieStore);
-}
+/** GET /calificaciones paginado (administrador y recepcionista): `promedio`, con un decimal o null,
+ * y `total` son de todo lo filtrado, no solo de la pagina. */
+export type PaginaCalificaciones = Pagina<CalificacionRegistrada> & { promedio: number | null };
 
 /* ------------------------------------- PQRS (EP06, publico) ------------------------------------- */
 

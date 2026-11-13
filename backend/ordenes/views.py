@@ -155,7 +155,9 @@ class OrdenListCreateView(generics.ListCreateAPIView):
         )
 
 
-class AlertasVencimientoView(generics.ListAPIView):
+class AlertasVencimientoView(ListaPaginadaMixin, generics.ListAPIView):
+    """Por urgencia y no por fecha de creacion, tambien al buscar y paginar."""
+
     serializer_class = OrdenAlertaSerializer
     # Antes de "Recibida" no hay fecha estimada; despues de "Lista" ya no hay que alertar.
     ESTADOS_CON_ALERTA = (
@@ -182,7 +184,10 @@ class AlertasVencimientoView(generics.ListAPIView):
         if self.request.user.rol == User.Rol.OPERARIO:
             ordenes = ordenes.filter(operario=self.request.user)
         # La fecha mas antigua primero: las mas retrasadas encabezan la lista.
-        return ordenes.select_related("cliente").order_by("fecha_estimada_entrega", "creado_en")
+        return ordenes.select_related("cliente").order_by("fecha_estimada_entrega", "creado_en", "id")
+
+    def filtrar_lista(self, ordenes, params):
+        return buscar_por_palabras(ordenes, params.get("buscar", ""), ("codigo", "cliente__nombre_completo"))
 
 
 MENSAJE_CODIGO_NO_ENCONTRADO = "No encontramos una orden con ese codigo. Revisa el comprobante."

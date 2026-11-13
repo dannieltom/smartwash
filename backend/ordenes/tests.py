@@ -15,6 +15,7 @@ from django.db import IntegrityError, OperationalError, connection, transaction
 from django.db.migrations.executor import MigrationExecutor
 from django.db.models import ProtectedError
 from django.test import SimpleTestCase, TestCase, TransactionTestCase, override_settings
+from django.test.utils import CaptureQueriesContext
 from django.utils import timezone
 from rest_framework.exceptions import ValidationError
 from rest_framework.test import APIClient, APITestCase
@@ -5108,3 +5109,78 @@ class HistorialNovedadesApiTests(PruebasDeListaMixin, APITestCase):
         self.client.force_authenticate(User.objects.create_user(username="pedro", password="x", rol=User.Rol.OPERARIO))
 
         self.assertEqual(self.listar().status_code, 403)
+
+
+class ListaAlertasPaginadaApiTests(APITestCase):
+    url = "/api/ordenes/alertas"
+
+    def setUp(self):
+        self.recepcion = User.objects.create_user(username="rita", password="x", rol=User.Rol.RECEPCIONISTA)
+        self.client.force_authenticate(self.recepcion)
+        self.numero = 0
+
+    def orden(self, dias_de_retraso, cliente=None, operario=None):
+        self.numero += 1
+        orden = crear_orden(codigo=f"SW-ALE{self.numero:05d}")
+        Orden.objects.filter(pk=orden.pk).update(
+            estado=Orden.Estado.EN_PROCESO,
+            fecha_estimada_entrega=timezone.localdate() - timedelta(days=dias_de_retraso),
+            operario=operario,
+            **({"cliente": cliente} if cliente else {}),
+        )
+        orden.refresh_from_db()
+        return orden
+
+    def codigos(self, **params):
+        response = self.client.get(self.url, params)
+        self.assertEqual(response.status_code, 200)
+        return [a["codigo"] for a in response.json()["resultados"]]
+
+    def test_sin_parametros_responde_la_lista_completa_como_antes(self):
+        self.orden(1)
+
+        self.assertIsInstance(self.client.get(self.url).json(), list)
+
+    def test_pagina_por_urgencia_la_mas_retrasada_primero(self):
+        ordenes = [self.orden(dias) for dias in (1, 5, 3, 0, 4)]
+        por_urgencia = [o.codigo for o in sorted(ordenes, key=lambda o: o.fecha_estimada_entrega)]
+
+        datos = self.client.get(self.url, {"tamano": 2}).json()
+
+        self.assertEqual((datos["total"], datos["paginas"]), (5, 3))
+        self.assertEqual(self.codigos(tamano=2), por_urgencia[:2])
+        self.assertEqual(self.codigos(tamano=2, pagina=2), por_urgencia[2:4])
+        self.assertEqual(self.codigos(pagina=9), [])
+        self.assertEqual(self.client.get(self.url, {"tamano": 500}).json()["tamano"], 100)
+
+    def test_parametros_invalidos_responden_400(self):
+        for params in ({"pagina": "0"}, {"tamano": "x"}):
+            with self.subTest(params=params):
+                self.assertEqual(self.client.get(self.url, params).status_code, 400)
+
+    def test_busca_por_codigo_y_cliente(self):
+        luis = Cliente.objects.create(documento="555", nombre_completo="Luis Perez", telefono="3")
+        de_ana = self.orden(2)
+        de_luis = self.orden(1, cliente=luis)
+
+        self.assertEqual(self.codigos(buscar=de_ana.codigo.lower()), [de_ana.codigo])
+        self.assertEqual(self.codigos(buscar="luis perez"), [de_luis.codigo])
+        self.assertEqual(self.codigos(buscar="ana perez"), [])
+
+    def test_el_operario_solo_ve_las_suyas(self):
+        pedro = User.objects.create_user(username="pedro", password="x", rol=User.Rol.OPERARIO)
+        suya = self.orden(2, operario=pedro)
+        self.orden(3)
+        self.client.force_authenticate(pedro)
+
+        self.assertEqual(self.codigos(buscar="ana"), [suya.codigo])
+
+    def test_las_consultas_no_dependen_del_tamano_de_la_pagina(self):
+        self.orden(1)
+        with CaptureQueriesContext(connection) as una:
+            self.client.get(self.url, {"pagina": 1})
+
+        for dias in range(6):
+            self.orden(dias)
+        with self.assertNumQueries(len(una.captured_queries)):
+            self.assertEqual(len(self.codigos(pagina=1)), 7)
