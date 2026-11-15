@@ -3966,8 +3966,6 @@ class AcumularPuntosTests(CatalogoDePruebaMixin, APITestCase):
 class MigracionValorUnitarioDeclaradoTests(TransactionTestCase):
     antes = [("ordenes", "0013_dano_cantidad_afectada")]
     despues = [("ordenes", "0014_dano_valor_unitario_declarado")]
-    # Al terminar, la base vuelve a la ultima migracion para las pruebas que siguen.
-    ultima = [("ordenes", "0015_quitar_duracion_estimada")]
 
     def test_un_dano_existente_conserva_su_total_y_reparte_el_valor_por_unidad(self):
         executor = MigrationExecutor(connection)
@@ -4005,8 +4003,11 @@ class MigracionValorUnitarioDeclaradoTests(TransactionTestCase):
             (dano.valor_declarado, dano.valor_unitario_declarado, dano.valor_servicio),
             (Decimal("75000"), Decimal("25000"), Decimal("54000")),
         )
-        executor.loader.build_graph()
-        executor.migrate(self.ultima)
+
+    def tearDown(self):
+        # La base vuelve a la ultima migracion para las pruebas que siguen.
+        executor = MigrationExecutor(connection)
+        executor.migrate(executor.loader.graph.leaf_nodes())
 
 
 
@@ -4032,9 +4033,14 @@ class MigracionTipoDeQuejaTests(TransactionTestCase):
 
         executor.loader.build_graph()
         executor.migrate(self.despues)
+        apps = executor.loader.project_state(otras + self.despues).apps
 
-        queja = Queja.objects.get()
+        queja = apps.get_model("ordenes", "Queja").objects.get()
         self.assertEqual((queja.tipo, queja.orden.codigo), (Queja.Tipo.QUEJA, "SW-VIEJA001"))
+
+    def tearDown(self):
+        executor = MigrationExecutor(connection)
+        executor.migrate(executor.loader.graph.leaf_nodes())
 
 BOGOTA = ZoneInfo("America/Bogota")
 
@@ -5184,3 +5190,123 @@ class ListaAlertasPaginadaApiTests(APITestCase):
             self.orden(dias)
         with self.assertNumQueries(len(una.captured_queries)):
             self.assertEqual(len(self.codigos(pagina=1)), 7)
+
+
+class CanjearPuntosApiTests(CatalogoDePruebaMixin, APITestCase):
+    def setUp(self):
+        self.crear_catalogo()
+        self.client.force_authenticate(self.recepcionista)
+        # Dos prendas: 6000 + 10000 = 16000.
+        self.registrar(self.prenda(self.planchado), self.prenda(self.lavado, color="rojo"))
+        self.orden = Orden.objects.get()
+        Cliente.objects.filter(pk=self.cliente.pk).update(puntos=500)
+        self.url = f"/api/ordenes/{self.orden.pk}/canje-puntos"
+
+    def canjear(self, puntos):
+        return self.client.post(self.url, {"puntos": puntos}, format="json")
+
+    def saldo(self):
+        self.cliente.refresh_from_db()
+        return self.cliente.puntos
+
+    def sin_cambios(self):
+        self.orden.refresh_from_db()
+        self.assertEqual(self.saldo(), 500)
+        self.assertEqual(self.orden.descuento_puntos, Decimal("0"))
+        self.assertEqual(self.orden.valor_total, Decimal("16000"))
+        self.assertFalse(self.orden.historial.filter(tipo_evento=Evento.CANJE_PUNTOS).exists())
+
+    def test_descuenta_los_puntos_del_saldo_y_aplica_el_beneficio_a_la_orden(self):
+        response = self.canjear(300)
+
+        self.assertEqual(response.status_code, 200, response.json())
+        self.assertEqual(self.saldo(), 200)
+        self.assertEqual(Decimal(response.json()["descuento_puntos"]), Decimal("3000"))
+        self.assertEqual(Decimal(response.json()["valor_total"]), Decimal("13000"))
+        evento = self.orden.historial.filter(tipo_evento=Evento.CANJE_PUNTOS).get()
+        self.assertEqual(evento.usuario, self.recepcionista)
+        self.assertEqual(
+            evento.detalle,
+            "300 puntos canjeados por $3000. Saldo del cliente: 200. Nuevo total $13000.00",
+        )
+
+    def test_en_espera_el_abono_minimo_se_calcula_sobre_el_total_con_el_canje(self):
+        self.canjear(300)
+
+        self.orden.refresh_from_db()
+        self.assertEqual(self.orden.abono_requerido, Decimal("3900"))
+
+    def test_varios_canjes_se_acumulan_en_la_orden(self):
+        self.canjear(100)
+        self.canjear(200)
+
+        self.orden.refresh_from_db()
+        self.assertEqual(self.saldo(), 200)
+        self.assertEqual(self.orden.descuento_puntos, Decimal("3000"))
+
+    def test_el_beneficio_se_conserva_al_agregar_prendas(self):
+        self.canjear(300)
+
+        self.client.post(
+            f"/api/ordenes/{self.orden.pk}/prendas", self.prenda(self.planchado), format="json"
+        )
+
+        self.orden.refresh_from_db()
+        self.assertEqual(self.orden.descuento_puntos, Decimal("3000"))
+        self.assertEqual(self.orden.valor_total, Decimal("19000"))
+
+    def test_rechaza_canjear_mas_puntos_que_el_saldo(self):
+        response = self.canjear(501)
+
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("solo tiene 500 puntos", str(response.json()))
+        self.sin_cambios()
+
+    def test_rechaza_un_descuento_mayor_que_el_total_de_la_orden(self):
+        Cliente.objects.filter(pk=self.cliente.pk).update(puntos=2000)
+
+        response = self.canjear(1601)
+
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("supera el total de la orden", str(response.json()))
+        self.assertEqual(self.saldo(), 2000)
+
+    def test_datos_invalidos_no_realizan_ningun_cambio(self):
+        for puntos in (None, 0, -5, "abc"):
+            with self.subTest(puntos=puntos):
+                datos = {} if puntos is None else {"puntos": puntos}
+
+                response = self.client.post(self.url, datos, format="json")
+
+                self.assertEqual(response.status_code, 400)
+                self.assertIn("puntos", response.json())
+        self.sin_cambios()
+
+    def test_solo_se_canjea_en_una_orden_activa(self):
+        for estado in Orden.Estado.values:
+            if estado in (Orden.Estado.EN_ESPERA, Orden.Estado.RECIBIDA, Orden.Estado.CLASIFICADA):
+                continue
+            with self.subTest(estado=estado):
+                Orden.objects.filter(pk=self.orden.pk).update(estado=estado)
+
+                response = self.canjear(100)
+
+                self.assertEqual(response.status_code, 400)
+                self.assertIn("solo se canjean antes de", str(response.json()))
+        self.assertEqual(self.saldo(), 500)
+
+    def test_el_operario_recibe_403(self):
+        operario = User.objects.create_user(username="op", password="x", rol=User.Rol.OPERARIO)
+        self.client.force_authenticate(operario)
+
+        self.assertEqual(self.canjear(100).status_code, 403)
+        self.sin_cambios()
+
+    def test_si_la_base_falla_no_se_descuentan_puntos(self):
+        with mock.patch(
+            "ordenes.views.registrar_evento", side_effect=OperationalError("sin conexion")
+        ), self.assertLogs("ordenes.historial", level="ERROR"):
+            response = self.canjear(300)
+
+        self.assertEqual(response.status_code, 503)
+        self.sin_cambios()

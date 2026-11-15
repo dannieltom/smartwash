@@ -39,7 +39,7 @@ from core.permissions import (
     SoloAdministradorEscribe,
     SoloOperario,
 )
-from fidelizacion.models import puntos_por_consumo
+from fidelizacion.models import descuento_por_puntos, puntos_por_consumo
 from pagos.models import Pago
 from turnos.services import esta_en_turno
 
@@ -61,11 +61,13 @@ from .models import (
     clasificacion_por_consumo,
 )
 from .serializers import (
+    ESTADOS_QUE_ADMITEN_LINEAS,
     ComprobanteSerializer,
     AgregarServicioSerializer,
     AsignacionSerializer,
     CambioEstadoSerializer,
     CancelacionSerializer,
+    CanjePuntosSerializer,
     ConsultaPorDocumentoSerializer,
     ConsultaPublicaSerializer,
     ConfiguracionDescuentoNovedadSerializer,
@@ -495,6 +497,51 @@ class CancelarOrdenView(APIView):
                     request.user,
                     f"${pagado} devueltos al cliente. Motivo: {motivo}",
                 )
+        return Response(OrdenSerializer(ordenes_con_detalle().get(pk=orden.pk)).data)
+
+
+class CanjearPuntosView(APIView):
+    permission_classes = [AdministradorORecepcionista]
+
+    def post(self, request, pk):
+        entrada = CanjePuntosSerializer(data=request.data)
+        entrada.is_valid(raise_exception=True)
+        puntos = entrada.validated_data["puntos"]
+        with operacion_sobre_orden():
+            orden = get_object_or_404(Orden.objects.select_for_update(), pk=pk)
+            if orden.estado not in ESTADOS_QUE_ADMITEN_LINEAS:
+                raise serializers.ValidationError(
+                    {
+                        "estado": f'La orden esta "{orden.estado}": los puntos solo se canjean '
+                        'antes de "En proceso".'
+                    }
+                )
+            # Bloqueado: dos canjes simultaneos no pueden gastar el mismo saldo.
+            cliente = Cliente.objects.select_for_update().get(pk=orden.cliente_id)
+            if puntos > cliente.puntos:
+                raise serializers.ValidationError(
+                    {"puntos": f"El cliente solo tiene {cliente.puntos} puntos."}
+                )
+            monto = descuento_por_puntos(puntos)
+            if monto > orden.valor_total:
+                raise serializers.ValidationError(
+                    {
+                        "puntos": f"El descuento (${monto}) supera el total de la orden "
+                        f"(${orden.valor_total})."
+                    }
+                )
+            cliente.puntos -= puntos
+            cliente.registrar_autoria(request.user)
+            cliente.save(update_fields=["puntos", "actualizado_por", "actualizado_en"])
+            orden.descuento_puntos += monto
+            guardar_recalculo(orden, request.user)
+            registrar_evento(
+                orden,
+                Evento.CANJE_PUNTOS,
+                request.user,
+                f"{puntos} puntos canjeados por ${monto}. Saldo del cliente: {cliente.puntos}. "
+                f"Nuevo total ${orden.valor_total}",
+            )
         return Response(OrdenSerializer(ordenes_con_detalle().get(pk=orden.pk)).data)
 
 

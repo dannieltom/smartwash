@@ -6,7 +6,7 @@ from django.db import IntegrityError
 from django.test import SimpleTestCase, TestCase, override_settings
 from rest_framework.test import APITestCase
 
-from .models import ReglaDescuento, puntos_por_consumo
+from .models import ReglaDescuento, descuento_por_puntos, puntos_por_consumo
 
 User = get_user_model()
 
@@ -151,3 +151,12 @@ class PuntosPorConsumoTests(SimpleTestCase):
     @override_settings(PUNTOS_CADA_PESOS=Decimal("500"))
     def test_la_equivalencia_se_configura(self):
         self.assertEqual(puntos_por_consumo(Decimal("16000")), 32)
+
+
+class DescuentoPorPuntosTests(SimpleTestCase):
+    def test_cada_punto_vale_diez_pesos(self):
+        self.assertEqual(descuento_por_puntos(300), Decimal("3000"))
+
+    @override_settings(PESOS_POR_PUNTO=Decimal("25"))
+    def test_el_valor_del_punto_se_configura(self):
+        self.assertEqual(descuento_por_puntos(4), Decimal("100"))
