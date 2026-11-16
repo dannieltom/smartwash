@@ -11,7 +11,7 @@ from django.utils.crypto import get_random_string
 from catalogo.models import Material, Tarifa, TipoPrenda, redondear_a_100
 from clientes.models import Cliente
 from core.models import ModeloConAutoria
-from fidelizacion.models import ReglaDescuento
+from fidelizacion.models import Promocion, ReglaDescuento
 
 PORCENTAJE_ABONO = Decimal("30")
 # Sin 0/O ni 1/I: el codigo se dicta por telefono y se copia a mano.
@@ -245,8 +245,10 @@ class Orden(ModeloConAutoria):
         """Valor y abono a partir de las lineas. No guarda."""
         lineas = OrdenServicio.objects.filter(prenda__orden=self)
         self.subtotal = lineas.aggregate(total=Sum("valor_aplicado"))["total"] or Decimal("0")
-        self.descuento = ReglaDescuento.objects.mayor_descuento(
-            self.cliente, self.subtotal, timezone.localdate()
+        hoy = timezone.localdate()
+        self.descuento = max(
+            ReglaDescuento.objects.mayor_descuento(self.cliente, self.subtotal, hoy),
+            Promocion.objects.mayor_descuento(self.cliente, self.subtotal, hoy),
         )
         self.aplicar_descuentos_por_incidencia()
         if not self.tiene_abono():

@@ -80,3 +80,81 @@ class ReglaDescuento(ModeloConAutoria):
         if self.tipo == self.Tipo.PORCENTAJE:
             return (monto * self.valor / 100).quantize(Decimal("0.01"))
         return min(self.valor, monto)
+
+
+class PromocionQuerySet(models.QuerySet):
+    def disponibles(self, cliente, fecha):
+        return self.filter(
+            activa=True,
+            vigente_desde__lte=fecha,
+            vigente_hasta__gte=fecha,
+            segmentos__clasificacion=cliente.clasificacion,
+        )
+
+    def mayor_descuento(self, cliente, monto, fecha):
+        return max(
+            (promocion.descuento_sobre(monto) for promocion in self.disponibles(cliente, fecha)),
+            default=Decimal("0"),
+        )
+
+
+class Promocion(ModeloConAutoria):
+    Tipo = ReglaDescuento.Tipo
+
+    nombre = models.CharField(max_length=120)
+    descripcion = models.CharField(max_length=255, blank=True)
+    tipo = models.CharField(max_length=20, choices=Tipo.choices)
+    valor = models.DecimalField(max_digits=10, decimal_places=2)
+    activa = models.BooleanField(default=True)
+    vigente_desde = models.DateField()
+    vigente_hasta = models.DateField()
+
+    objects = PromocionQuerySet.as_manager()
+
+    class Meta:
+        ordering = ("-vigente_desde", "nombre")
+        verbose_name = "promoción"
+        verbose_name_plural = "promociones"
+        constraints = [
+            models.CheckConstraint(
+                condition=models.Q(valor__gte=0), name="promocion_valor_no_negativo"
+            ),
+            models.CheckConstraint(
+                condition=~models.Q(tipo="porcentaje") | models.Q(valor__lte=100),
+                name="promocion_porcentaje_no_supera_100",
+            ),
+            models.CheckConstraint(
+                condition=models.Q(vigente_hasta__gte=models.F("vigente_desde")),
+                name="promocion_vigencia_coherente",
+            ),
+        ]
+
+    def __str__(self):
+        return self.nombre
+
+    @property
+    def clasificaciones(self):
+        return sorted(segmento.clasificacion for segmento in self.segmentos.all())
+
+    def esta_disponible(self, fecha):
+        return self.activa and self.vigente_desde <= fecha <= self.vigente_hasta
+
+    def descuento_sobre(self, monto):
+        if self.tipo == self.Tipo.PORCENTAJE:
+            return (monto * self.valor / 100).quantize(Decimal("0.01"))
+        return min(self.valor, monto)
+
+
+class SegmentoPromocion(models.Model):
+    promocion = models.ForeignKey(Promocion, on_delete=models.CASCADE, related_name="segmentos")
+    clasificacion = models.CharField(max_length=30, choices=Cliente.Clasificacion.choices)
+
+    class Meta:
+        constraints = [
+            models.UniqueConstraint(
+                fields=("promocion", "clasificacion"), name="segmento_promocion_unico"
+            ),
+        ]
+
+    def __str__(self):
+        return f"{self.promocion} · {self.clasificacion}"
