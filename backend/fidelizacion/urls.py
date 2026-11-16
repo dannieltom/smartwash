@@ -3,6 +3,7 @@ from django.urls import path
 from .views import (
     AsignarBeneficiosInactividadView,
     ClientesInactivosView,
+    EnviarComunicacionesView,
     PromocionDetailView,
     PromocionesDisponiblesView,
     PromocionListCreateView,
@@ -39,5 +40,8 @@ urlpatterns = [
         "clientes-inactivos/asignar-beneficios",
         AsignarBeneficiosInactividadView.as_view(),
         name="asignar-beneficios-inactividad",
+    ),
+    path(
+        "comunicaciones/enviar", EnviarComunicacionesView.as_view(), name="enviar-comunicaciones"
     ),
 ]

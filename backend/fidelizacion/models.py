@@ -211,3 +211,27 @@ class BeneficioInactividad(models.Model):
 
     def __str__(self):
         return f"{self.cliente} · {self.regla} · +{self.puntos}"
+
+
+class ComunicacionPromocional(models.Model):
+    """Una promocion se comunica una sola vez a cada cliente."""
+
+    cliente = models.ForeignKey(
+        Cliente, on_delete=models.PROTECT, related_name="comunicaciones_promocionales"
+    )
+    promocion = models.ForeignKey(
+        Promocion, on_delete=models.PROTECT, related_name="comunicaciones"
+    )
+    correo = models.EmailField(max_length=150)
+    enviada_en = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ("-enviada_en", "-id")
+        constraints = [
+            models.UniqueConstraint(
+                fields=("cliente", "promocion"), name="comunicacion_promocional_unica"
+            ),
+        ]
+
+    def __str__(self):
+        return f"{self.promocion} → {self.cliente}"

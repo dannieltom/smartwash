@@ -16,6 +16,7 @@ from .serializers import (
     ReglaDescuentoSerializer,
     ReglaInactividadSerializer,
 )
+from .comunicaciones import ProcesoComunicacionesFallido, enviar_comunicaciones
 from .services import (
     ProcesoInactividadFallido,
     SinReglasDeInactividad,
@@ -115,3 +116,15 @@ class AsignarBeneficiosInactividadView(APIView):
                 {"detail": MENSAJE_PROCESO_FALLIDO}, status=status.HTTP_503_SERVICE_UNAVAILABLE
             )
         return Response(resultado)
+
+
+class EnviarComunicacionesView(APIView):
+    permission_classes = [SoloAdministrador]
+
+    def post(self, request):
+        try:
+            return Response(enviar_comunicaciones())
+        except ProcesoComunicacionesFallido:
+            return Response(
+                {"detail": MENSAJE_PROCESO_FALLIDO}, status=status.HTTP_503_SERVICE_UNAVAILABLE
+            )
