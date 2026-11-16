@@ -5251,6 +5251,7 @@ class CanjearPuntosApiTests(CatalogoDePruebaMixin, APITestCase):
         self.assertEqual(response.status_code, 200, response.json())
         self.assertEqual(self.saldo(), 200)
         self.assertEqual(Decimal(response.json()["descuento_puntos"]), Decimal("3000"))
+        self.assertEqual(response.json()["puntos_canjeados"], 300)
         self.assertEqual(Decimal(response.json()["valor_total"]), Decimal("13000"))
         evento = self.orden.historial.filter(tipo_evento=Evento.CANJE_PUNTOS).get()
         self.assertEqual(evento.usuario, self.recepcionista)
@@ -5283,6 +5284,40 @@ class CanjearPuntosApiTests(CatalogoDePruebaMixin, APITestCase):
         self.orden.refresh_from_db()
         self.assertEqual(self.orden.descuento_puntos, Decimal("3000"))
         self.assertEqual(self.orden.valor_total, Decimal("19000"))
+
+    def test_cancelar_la_orden_devuelve_los_puntos_canjeados(self):
+        self.canjear(300)
+        self.canjear(100)
+        self.assertEqual(self.saldo(), 100)
+
+        response = self.client.post(
+            f"/api/ordenes/{self.orden.pk}/cancelacion", {"motivo": "El cliente se retracto"}, format="json"
+        )
+
+        self.assertEqual(response.status_code, 200, response.json())
+        self.assertEqual(self.saldo(), 500)
+        evento = self.orden.historial.filter(tipo_evento=Evento.CANCELACION).get()
+        self.assertIn("Puntos devueltos al cliente: 400 (saldo 500)", evento.detalle)
+
+    def test_devuelve_los_puntos_con_el_valor_del_punto_que_se_uso_al_canjear(self):
+        self.canjear(300)
+
+        with override_settings(PESOS_POR_PUNTO=Decimal("25")):
+            self.client.post(
+                f"/api/ordenes/{self.orden.pk}/cancelacion", {"motivo": "Cambio de planes"}, format="json"
+            )
+
+        self.assertEqual(self.saldo(), 500)
+
+    def test_cancelar_sin_canje_no_toca_el_saldo(self):
+        response = self.client.post(
+            f"/api/ordenes/{self.orden.pk}/cancelacion", {"motivo": "Cambio de planes"}, format="json"
+        )
+
+        self.assertEqual(response.status_code, 200, response.json())
+        self.assertEqual(self.saldo(), 500)
+        evento = self.orden.historial.filter(tipo_evento=Evento.CANCELACION).get()
+        self.assertNotIn("Puntos devueltos", evento.detalle)
 
     def test_rechaza_canjear_mas_puntos_que_el_saldo(self):
         response = self.canjear(501)

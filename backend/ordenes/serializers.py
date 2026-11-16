@@ -270,6 +270,7 @@ class OrdenSerializer(serializers.ModelSerializer):
             "descuento_novedad",
             "descuento_dano",
             "descuento_puntos",
+            "puntos_canjeados",
             "valor_total",
             "abono_requerido",
             "fecha_estimada_entrega",
