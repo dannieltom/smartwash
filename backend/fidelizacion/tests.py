@@ -4,6 +4,7 @@ from unittest import mock
 from decimal import Decimal
 
 from django.contrib.auth import get_user_model
+from django.core import mail
 from django.core.management import CommandError, call_command
 from django.db import IntegrityError
 from django.test import SimpleTestCase, TestCase, override_settings
@@ -12,10 +13,12 @@ from rest_framework.test import APITestCase
 
 from clientes.models import Cliente
 
-from ordenes.models import Orden
+from ordenes.models import HistorialOrden, Orden
+from ordenes.recordatorios import enviar_recordatorios
 
 from .models import (
     BeneficioInactividad,
+    ComunicacionPromocional,
     Promocion,
     ReglaDescuento,
     ReglaInactividad,
@@ -705,6 +708,276 @@ class AsignarBeneficiosInactividadTests(InactividadBase):
 
         self.assertEqual(self.puntos(cliente), 50)
         self.assertIn("1 beneficios", salida.getvalue())
+
+
+class ComunicacionesBase(InactividadBase):
+    RUTA = "/api/fidelizacion/comunicaciones/enviar"
+
+    def orden_lista(self, hace_dias, correo="ana@example.com", estado=Orden.Estado.LISTA):
+        cliente = self.cliente(registrado_hace=400)
+        Cliente.objects.filter(pk=cliente.pk).update(correo=correo)
+        orden = Orden.objects.create(
+            codigo=f"LISTA-{self.contador}", cliente=cliente, recepcionista=self.recepcion, estado=estado
+        )
+        self.evento(
+            orden, HistorialOrden.TipoEvento.CAMBIO_ESTADO,
+            "Control de calidad → Lista para entrega", hace_dias,
+        )
+        return orden
+
+    def evento(self, orden, tipo, detalle, hace_dias):
+        # El historial es inmutable: la fecha pasada se fija al crearlo.
+        with mock.patch("django.utils.timezone.now", return_value=self.hace(hace_dias)):
+            HistorialOrden.objects.create(orden=orden, tipo_evento=tipo, detalle=detalle)
+
+    def recordatorios(self, orden):
+        return orden.historial.filter(
+            tipo_evento=HistorialOrden.TipoEvento.NOTIFICACION,
+            detalle__startswith="Recordatorio de orden no reclamada",
+        ).count()
+
+
+class RecordatoriosOrdenesTests(ComunicacionesBase):
+    def setUp(self):
+        super().setUp()
+        self.client.login(username="admin", password="x")
+
+    def enviar(self):
+        return self.client.post(self.RUTA)
+
+    def test_recuerda_la_orden_que_lleva_el_periodo_lista_sin_reclamar(self):
+        orden = self.orden_lista(hace_dias=4)
+
+        response = self.enviar()
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["recordatorios"], {"enviados": 1, "sin_correo": 0, "fallidos": 0})
+        self.assertEqual(len(mail.outbox), 1)
+        self.assertEqual(mail.outbox[0].to, ["ana@example.com"])
+        self.assertIn(orden.codigo, mail.outbox[0].subject)
+        self.assertEqual(self.recordatorios(orden), 1)
+
+    def test_no_recuerda_una_orden_reciente_ni_una_que_no_esta_lista(self):
+        self.orden_lista(hace_dias=1)
+        self.orden_lista(hace_dias=10, estado=Orden.Estado.ENTREGADA)
+
+        self.enviar()
+
+        self.assertEqual(mail.outbox, [])
+
+    def test_no_repite_el_recordatorio_antes_de_que_pase_otro_periodo(self):
+        orden = self.orden_lista(hace_dias=4)
+        self.enviar()
+        self.enviar()
+
+        self.assertEqual(len(mail.outbox), 1)
+        self.assertEqual(self.recordatorios(orden), 1)
+
+    def test_repite_pasado_el_periodo_y_se_detiene_en_el_maximo(self):
+        orden = self.orden_lista(hace_dias=40)
+        for dias in (30, 20):
+            self.evento(
+                orden, HistorialOrden.TipoEvento.NOTIFICACION,
+                "Recordatorio de orden no reclamada enviado a ana@example.com.", dias,
+            )
+
+        self.enviar()
+        self.assertEqual(self.recordatorios(orden), 3)
+
+        enviar_recordatorios(ahora=timezone.now() + timedelta(days=10))
+
+        self.assertEqual(self.recordatorios(orden), 3)
+        self.assertEqual(len(mail.outbox), 1)
+
+    def test_cuenta_desde_la_ultima_vez_que_quedo_lista(self):
+        orden = self.orden_lista(hace_dias=30)
+        self.evento(
+            orden, HistorialOrden.TipoEvento.CAMBIO_ESTADO, "Lista para entrega → En proceso", 20
+        )
+        self.evento(
+            orden, HistorialOrden.TipoEvento.CAMBIO_ESTADO,
+            "Control de calidad → Lista para entrega", 1,
+        )
+
+        self.enviar()
+
+        self.assertEqual(mail.outbox, [])
+
+    def test_sin_correo_no_envia_y_lo_informa(self):
+        orden = self.orden_lista(hace_dias=5, correo="")
+
+        resultado = self.enviar().json()["recordatorios"]
+
+        self.assertEqual(resultado, {"enviados": 0, "sin_correo": 1, "fallidos": 0})
+        self.assertEqual(self.recordatorios(orden), 0)
+
+    def test_un_envio_fallido_no_frena_a_los_demas_y_se_reintenta_despues(self):
+        fallida = self.orden_lista(hace_dias=6, correo="falla@example.com")
+        buena = self.orden_lista(hace_dias=5, correo="ok@example.com")
+        original = mail.EmailMessage.send
+
+        def envia(mensaje, *args, **kwargs):
+            if "falla@example.com" in mensaje.to:
+                raise OSError("smtp caido")
+            return original(mensaje, *args, **kwargs)
+
+        with (
+            mock.patch.object(mail.EmailMessage, "send", envia),
+            self.assertLogs("ordenes.recordatorios", level="ERROR"),
+        ):
+            resultado = self.enviar().json()["recordatorios"]
+
+        self.assertEqual(resultado, {"enviados": 1, "sin_correo": 0, "fallidos": 1})
+        self.assertEqual((self.recordatorios(fallida), self.recordatorios(buena)), (0, 1))
+
+        self.enviar()
+        self.assertEqual(self.recordatorios(fallida), 1)
+
+    def test_el_periodo_se_configura(self):
+        self.orden_lista(hace_dias=1)
+
+        with override_settings(DIAS_RECORDATORIO_ORDEN_LISTA=1):
+            self.enviar()
+
+        self.assertEqual(len(mail.outbox), 1)
+
+    def test_si_la_base_falla_registra_el_error_y_no_cambia_nada(self):
+        orden = self.orden_lista(hace_dias=5)
+        from django.db import OperationalError
+
+        with (
+            mock.patch(
+                "fidelizacion.comunicaciones.enviar_recordatorios", side_effect=OperationalError("caida")
+            ),
+            self.assertLogs("fidelizacion.comunicaciones", level="ERROR"),
+        ):
+            response = self.enviar()
+
+        self.assertEqual(response.status_code, 503)
+        self.assertEqual(mail.outbox, [])
+        self.assertEqual(self.recordatorios(orden), 0)
+
+
+class ComunicacionesPromocionalesTests(ComunicacionesBase):
+    def setUp(self):
+        super().setUp()
+        self.client.login(username="admin", password="x")
+
+    def promocion(self, segmentos=("VIP",), activa=True, desde=-1, hasta=10, **extra):
+        datos = {
+            "nombre": "Semana VIP", "tipo": "porcentaje", "valor": 15, "activa": activa,
+            "vigente_desde": self.hoy + timedelta(days=desde),
+            "vigente_hasta": self.hoy + timedelta(days=hasta),
+        }
+        datos.update(extra)
+        promocion = Promocion.objects.create(**datos)
+        for clasificacion in segmentos:
+            promocion.segmentos.create(clasificacion=clasificacion)
+        return promocion
+
+    def cliente_con_correo(self, clasificacion="VIP", correo="vip@example.com"):
+        cliente = self.cliente()
+        Cliente.objects.filter(pk=cliente.pk).update(clasificacion=clasificacion, correo=correo)
+        return cliente
+
+    def enviar(self):
+        return self.client.post(self.RUTA).json()["promociones"]
+
+    def test_envia_la_promocion_vigente_a_los_clientes_de_su_segmento(self):
+        promocion = self.promocion(descripcion="Solo esta semana")
+        vip = self.cliente_con_correo("VIP", "vip@example.com")
+        self.cliente_con_correo("Ocasional", "otro@example.com")
+
+        resultado = self.enviar()
+
+        self.assertEqual(resultado, {"enviados": 1, "sin_correo": 0, "fallidos": 0})
+        self.assertEqual(len(mail.outbox), 1)
+        self.assertEqual(mail.outbox[0].to, ["vip@example.com"])
+        self.assertIn("15% de descuento", mail.outbox[0].body)
+        self.assertIn("Solo esta semana", mail.outbox[0].body)
+        self.assertEqual(ComunicacionPromocional.objects.get().cliente, vip)
+        self.assertEqual(ComunicacionPromocional.objects.get().promocion, promocion)
+
+    def test_un_monto_fijo_se_muestra_en_pesos(self):
+        self.promocion(tipo="monto_fijo", valor=5000)
+        self.cliente_con_correo()
+
+        self.enviar()
+
+        self.assertIn("$5.000 de descuento", mail.outbox[0].body)
+
+    def test_no_envia_promociones_inactivas_vencidas_ni_futuras(self):
+        self.cliente_con_correo()
+        self.promocion(activa=False)
+        self.promocion(desde=-9, hasta=-1)
+        self.promocion(desde=1, hasta=9)
+
+        self.enviar()
+
+        self.assertEqual(mail.outbox, [])
+
+    def test_no_repite_la_misma_promocion_al_mismo_cliente(self):
+        self.promocion()
+        self.cliente_con_correo()
+
+        self.enviar()
+        segunda = self.enviar()
+
+        self.assertEqual(segunda["enviados"], 0)
+        self.assertEqual(len(mail.outbox), 1)
+
+    def test_un_cliente_nuevo_en_el_segmento_recibe_la_promocion_despues(self):
+        self.promocion()
+        self.cliente_con_correo("VIP", "uno@example.com")
+        self.enviar()
+        self.cliente_con_correo("VIP", "dos@example.com")
+
+        self.enviar()
+
+        self.assertEqual(sorted(m.to[0] for m in mail.outbox), ["dos@example.com", "uno@example.com"])
+
+    def test_sin_correo_no_envia_y_lo_informa(self):
+        self.promocion()
+        self.cliente_con_correo("VIP", "")
+
+        self.assertEqual(self.enviar(), {"enviados": 0, "sin_correo": 1, "fallidos": 0})
+        self.assertFalse(ComunicacionPromocional.objects.exists())
+
+    def test_un_envio_fallido_no_queda_registrado_y_se_reintenta(self):
+        self.promocion()
+        cliente = self.cliente_con_correo()
+
+        with (
+            mock.patch.object(mail.EmailMessage, "send", side_effect=OSError("smtp caido")),
+            self.assertLogs("fidelizacion.comunicaciones", level="ERROR"),
+        ):
+            resultado = self.enviar()
+
+        self.assertEqual(resultado, {"enviados": 0, "sin_correo": 0, "fallidos": 1})
+        self.assertFalse(ComunicacionPromocional.objects.exists())
+
+        self.assertEqual(self.enviar()["enviados"], 1)
+        self.assertEqual(ComunicacionPromocional.objects.get().cliente, cliente)
+
+    def test_solo_el_administrador_dispara_el_envio(self):
+        self.promocion()
+        self.cliente_con_correo()
+        self.client.login(username="recep", password="x")
+
+        self.assertEqual(self.client.post(self.RUTA).status_code, 403)
+        self.assertEqual(mail.outbox, [])
+
+    def test_el_comando_envia_ambas_comunicaciones(self):
+        self.promocion()
+        self.cliente_con_correo()
+        self.orden_lista(hace_dias=5)
+        salida = StringIO()
+
+        call_command("enviar_comunicaciones", stdout=salida)
+
+        self.assertEqual(len(mail.outbox), 2)
+        self.assertIn("recordatorios: 1 enviados", salida.getvalue())
+        self.assertIn("promociones: 1 enviados", salida.getvalue())
 
 
 class PuntosPorConsumoTests(SimpleTestCase):
