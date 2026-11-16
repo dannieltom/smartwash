@@ -53,6 +53,7 @@ INSTALLED_APPS = [
     "pagos",
     "turnos",
     "satisfaccion",
+    "indicadores",
     # drf
     "drf_spectacular",
 ]
