@@ -24,6 +24,7 @@ from rest_framework.views import APIView
 from drf_spectacular.utils import extend_schema  # <-- Importamos extend_schema
 
 from core.listas import FECHA, PAGINACION, ListaPaginadaMixin, buscar_por_palabras, filtrar_por_fecha, opcion
+from core.permissions import SoloAdministrador
 from turnos.services import turno_vigente
 
 from .models import RegistroAuditoria, User
@@ -275,6 +276,7 @@ ACTIVO = {"true": True, "false": False}
 
 
 class UsuarioInternoListCreateView(ListaPaginadaMixin, generics.ListCreateAPIView):
+    permission_classes = [SoloAdministrador]
     queryset = get_user_model().objects.all().order_by("username")
     parametros_de_lista = (*PAGINACION, "rol", "activo")
 
@@ -297,11 +299,14 @@ class UsuarioInternoListCreateView(ListaPaginadaMixin, generics.ListCreateAPIVie
 class UsuarioInternoDetailView(generics.RetrieveUpdateAPIView):
     """Sin destroy: la baja es "desactivar", no borrar (ver UsuarioDesactivarView)."""
 
+    permission_classes = [SoloAdministrador]
     queryset = get_user_model().objects.all()
     serializer_class = UsuarioInternoSerializer
 
 
 class UsuarioDesactivarView(APIView):
+    permission_classes = [SoloAdministrador]
+
     def post(self, request, pk):
         usuario = get_object_or_404(get_user_model(), pk=pk)
         if es_ultimo_admin_activo(usuario):
@@ -313,12 +318,9 @@ class UsuarioDesactivarView(APIView):
 
 
 class UsuarioActivarView(APIView):
+    permission_classes = [SoloAdministrador]
+
     def post(self, request, pk):
-        if request.user.rol != User.Rol.ADMINISTRADOR:
-            return Response(
-                {"detail": "Solo un administrador puede activar usuarios."},
-                status=status.HTTP_403_FORBIDDEN,
-            )
         usuario = get_object_or_404(get_user_model(), pk=pk)
         # Sin cambio no se guarda: la senal registraria una edicion vacia.
         if not usuario.is_active:
@@ -329,6 +331,7 @@ class UsuarioActivarView(APIView):
 
 
 class HistorialUsuarioView(generics.ListAPIView):
+    permission_classes = [SoloAdministrador]
     serializer_class = HistorialAccionSerializer
 
     def get_queryset(self):
@@ -338,6 +341,7 @@ class HistorialUsuarioView(generics.ListAPIView):
 class TrazabilidadView(ListaPaginadaMixin, generics.ListAPIView):
     """`rol` solo no pagina, como antes; con buscar, fecha, pagina o tamano responde paginado."""
 
+    permission_classes = [SoloAdministrador]
     serializer_class = AccionAuditoriaSerializer
     parametros_de_lista = (*PAGINACION, *FECHA)
     con_anios = "fecha"
