@@ -13,6 +13,10 @@ def puntos_por_consumo(valor):
     return int(valor // getattr(settings, "PUNTOS_CADA_PESOS", Decimal("1000")))
 
 
+def descuento_por_puntos(puntos):
+    return puntos * getattr(settings, "PESOS_POR_PUNTO", Decimal("10"))
+
+
 class ReglaDescuentoQuerySet(models.QuerySet):
     def aplicables(self, cliente, fecha):
         # A diferencia de las tarifas, vigente_hasta es inclusivo: una promocion

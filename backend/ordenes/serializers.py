@@ -269,6 +269,7 @@ class OrdenSerializer(serializers.ModelSerializer):
             "descuento",
             "descuento_novedad",
             "descuento_dano",
+            "descuento_puntos",
             "valor_total",
             "abono_requerido",
             "fecha_estimada_entrega",
@@ -785,6 +786,18 @@ class HistorialNovedadSerializer(NovedadSerializer):
 
     def get_estado(self, novedad) -> str:
         return "pendiente" if novedad.pendiente else "resuelta"
+
+
+class CanjePuntosSerializer(serializers.Serializer):
+    puntos = serializers.IntegerField(
+        min_value=1,
+        error_messages={
+            "required": "Indica cuantos puntos se canjean.",
+            "null": "Indica cuantos puntos se canjean.",
+            "invalid": "Los puntos deben ser un numero entero.",
+            "min_value": "Canjea al menos un punto.",
+        },
+    )
 
 
 class CancelacionSerializer(serializers.Serializer):
