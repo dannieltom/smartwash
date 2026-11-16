@@ -24,7 +24,7 @@ from rest_framework.throttling import SimpleRateThrottle
 from catalogo.models import Material, NivelDificultad, Servicio, Tarifa, TipoPrenda, redondear_a_100
 from clientes.models import Cliente
 from core.pruebas import PruebasDeListaMixin
-from fidelizacion.models import ReglaDescuento
+from fidelizacion.models import Promocion, ReglaDescuento
 from pagos.models import Pago
 from turnos.models import Turno
 
@@ -525,6 +525,35 @@ class RegistrarOrdenApiTests(CatalogoDePruebaMixin, APITestCase):
 
         self.assertEqual(Decimal(response.json()["descuento"]), Decimal("2700"))
         self.assertEqual(Decimal(response.json()["valor_total"]), Decimal("24300"))
+
+    def test_una_promocion_vigente_del_segmento_del_cliente_descuenta_en_la_orden(self):
+        self.tarifa(self.pantalon, self.planchado, "27000")
+        hoy = timezone.localdate()
+        ReglaDescuento.objects.create(
+            nombre="5%", tipo="porcentaje", valor=5, vigente_desde=date(2020, 1, 1)
+        )
+        promocion = Promocion.objects.create(
+            nombre="20%", tipo="porcentaje", valor=20,
+            vigente_desde=hoy, vigente_hasta=hoy,
+        )
+        promocion.segmentos.create(clasificacion=self.cliente.clasificacion)
+
+        response = self.registrar(self.prenda(self.planchado, tipo=self.pantalon, cantidad=1))
+
+        self.assertEqual(Decimal(response.json()["descuento"]), Decimal("5400"))
+
+    def test_una_promocion_de_otro_segmento_no_descuenta_en_la_orden(self):
+        self.tarifa(self.pantalon, self.planchado, "27000")
+        hoy = timezone.localdate()
+        promocion = Promocion.objects.create(
+            nombre="Solo VIP", tipo="porcentaje", valor=20,
+            vigente_desde=hoy, vigente_hasta=hoy,
+        )
+        promocion.segmentos.create(clasificacion=Cliente.Clasificacion.VIP)
+
+        response = self.registrar(self.prenda(self.planchado, tipo=self.pantalon, cantidad=1))
+
+        self.assertEqual(Decimal(response.json()["descuento"]), Decimal("0"))
 
     def test_sin_regla_aplicable_el_descuento_es_cero(self):
         ReglaDescuento.objects.create(
