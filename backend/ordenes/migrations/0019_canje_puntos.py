@@ -15,6 +15,11 @@ class Migration(migrations.Migration):
             name='descuento_puntos',
             field=models.DecimalField(decimal_places=2, default=0, max_digits=10),
         ),
+        migrations.AddField(
+            model_name='orden',
+            name='puntos_canjeados',
+            field=models.PositiveIntegerField(default=0),
+        ),
         migrations.AlterField(
             model_name='historialorden',
             name='tipo_evento',

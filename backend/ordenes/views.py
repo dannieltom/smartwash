@@ -470,6 +470,22 @@ class CambiarEstadoView(APIView):
         return Response(OrdenSerializer(ordenes_con_detalle().get(pk=orden.pk)).data)
 
 
+def devolver_puntos_canjeados(orden, usuario):
+    """Devuelve al cliente los puntos canjeados en una orden cancelada.
+
+    Va dentro de la transaccion de la cancelacion. Devuelve la nota para el historial
+    (vacia si la orden no tenia canje).
+    """
+    puntos = orden.puntos_canjeados
+    if puntos == 0:
+        return ""
+    cliente = Cliente.objects.select_for_update().get(pk=orden.cliente_id)
+    cliente.puntos += puntos
+    cliente.registrar_autoria(usuario)
+    cliente.save(update_fields=["puntos", "actualizado_por", "actualizado_en"])
+    return f". Puntos devueltos al cliente: {puntos} (saldo {cliente.puntos})"
+
+
 class CancelarOrdenView(APIView):
     permission_classes = [AdministradorORecepcionista]
 
@@ -487,6 +503,7 @@ class CancelarOrdenView(APIView):
             detalle = f"{anterior} → {orden.estado}. Motivo: {motivo}"
             if operario is not None:
                 detalle += f". Sale de la bandeja de {nombre_usuario(operario)}"
+            detalle += devolver_puntos_canjeados(orden, request.user)
             registrar_evento(orden, Evento.CANCELACION, request.user, detalle)
             # Los pagos no se tocan: la devolucion queda solo en el historial.
             pagado = orden.total_pagado()
@@ -534,6 +551,7 @@ class CanjearPuntosView(APIView):
             cliente.registrar_autoria(request.user)
             cliente.save(update_fields=["puntos", "actualizado_por", "actualizado_en"])
             orden.descuento_puntos += monto
+            orden.puntos_canjeados += puntos
             guardar_recalculo(orden, request.user)
             registrar_evento(
                 orden,
