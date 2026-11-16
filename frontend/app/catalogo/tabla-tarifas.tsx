@@ -164,7 +164,7 @@ function FilaTarifa({
       <tr className="border-t border-(--sw-hairline)">
         <td data-label="Servicio" className="px-5 py-3 font-semibold text-(--sw-ink)">{tarifa.servicio_nombre}</td>
         {conTipo && (
-          <td data-label="Tipo de prenda" className="px-5 py-3 text-(--sw-ink-soft)">{tarifa.tipo_prenda_nombre}</td>
+          <td data-label="Tipo de prenda" className="px-5 py-3 text-(--sw-ink-soft)">{tarifa.tipo_prenda_nombre ?? "General"}</td>
         )}
         {enEdicion ? (
           <>

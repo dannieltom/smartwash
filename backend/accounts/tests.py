@@ -11,6 +11,9 @@ from django.utils.encoding import force_bytes
 from django.utils.http import urlsafe_base64_encode
 from rest_framework.test import APIClient, APITestCase
 from django.test import override_settings
+from django.utils import timezone
+
+from core.pruebas import PruebasDeListaMixin
 
 from .models import RegistroAuditoria
 
@@ -332,6 +335,67 @@ class UsuarioInternoTests(APITestCase):
         self.assertEqual(response.status_code, 200)
 
 
+class AccesoUsuariosPorRolTests(APITestCase):
+    def setUp(self):
+        self.objetivo = User.objects.create_user(
+            username="operario1", password="x", rol=User.Rol.OPERARIO
+        )
+
+    def iniciar_como(self, rol):
+        User.objects.create_user(username=f"{rol}-sesion", password="x", rol=rol)
+        self.client.login(username=f"{rol}-sesion", password="x")
+
+    def test_recepcionista_y_operario_no_ven_ni_cambian_usuarios(self):
+        for rol in (User.Rol.RECEPCIONISTA, User.Rol.OPERARIO):
+            with self.subTest(rol=rol):
+                self.iniciar_como(rol)
+                ruta = f"/api/usuarios/{self.objetivo.id}"
+                self.assertEqual(self.client.get("/api/usuarios").status_code, 403)
+                self.assertEqual(self.client.get(ruta).status_code, 403)
+                self.assertEqual(
+                    self.client.post(
+                        "/api/usuarios",
+                        {"username": "nueva", "password": "Clave-segura-2026", "rol": "operario"},
+                    ).status_code,
+                    403,
+                )
+                self.assertEqual(
+                    self.client.patch(ruta, {"rol": "administrador"}, format="json").status_code,
+                    403,
+                )
+                self.assertEqual(
+                    self.client.post(f"{ruta}/desactivar").status_code, 403
+                )
+                self.client.logout()
+
+        self.objetivo.refresh_from_db()
+        self.assertEqual(self.objetivo.rol, User.Rol.OPERARIO)
+        self.assertTrue(self.objetivo.is_active)
+        self.assertFalse(User.objects.filter(username="nueva").exists())
+
+    def test_recepcionista_y_operario_no_ven_historial_ni_trazabilidad(self):
+        for rol in (User.Rol.RECEPCIONISTA, User.Rol.OPERARIO):
+            with self.subTest(rol=rol):
+                self.iniciar_como(rol)
+                self.assertEqual(
+                    self.client.get(f"/api/usuarios/{self.objetivo.id}/historial").status_code, 403
+                )
+                self.assertEqual(
+                    self.client.get("/api/usuarios/trazabilidad").status_code, 403
+                )
+                self.client.logout()
+
+    def test_administrador_si_accede_a_la_gestion_de_usuarios(self):
+        User.objects.create_user(username="admin", password="x", rol=User.Rol.ADMINISTRADOR)
+        self.client.login(username="admin", password="x")
+        self.assertEqual(self.client.get("/api/usuarios").status_code, 200)
+        self.assertEqual(self.client.get(f"/api/usuarios/{self.objetivo.id}").status_code, 200)
+        self.assertEqual(
+            self.client.get(f"/api/usuarios/{self.objetivo.id}/historial").status_code, 200
+        )
+        self.assertEqual(self.client.get("/api/usuarios/trazabilidad").status_code, 200)
+
+
 class AuditoriaTests(APITestCase):
     def setUp(self):
         self.admin = User.objects.create_user(
@@ -599,3 +663,80 @@ class RecuperarPasswordTests(APITestCase):
         response = self.client.post(self.CONFIRMAR, {}, format="json")
         self.assertEqual(response.status_code, 400)
         self.assertEqual(set(response.json()), {"uid", "token", "password"})
+
+
+class ListaUsuariosPaginadaApiTests(PruebasDeListaMixin, APITestCase):
+    url = "/api/usuarios"
+    invalidos = ({"rol": "cliente"}, {"activo": "si"})
+
+    def setUp(self):
+        self.client.force_authenticate(
+            User.objects.create_user(username="jefe", password="x", rol=User.Rol.ADMINISTRADOR)
+        )
+        self.numero = 0
+
+    def crear(self, cuando, **campos):
+        self.numero += 1
+        usuario = User.objects.create_user(
+            username=campos.pop("username", f"usuario{self.numero}"), password="x", rol=campos.pop("rol", User.Rol.OPERARIO), **campos
+        )
+        User.objects.filter(pk=usuario.pk).update(date_joined=cuando)
+        return usuario
+
+    def test_busca_por_usuario_nombre_apellido_y_correo(self):
+        ana = self.crear(timezone.now(), username="arojas", first_name="Ana", last_name="Rojas", email="ana@sw.co")
+        luis = self.crear(timezone.now(), username="lperez", first_name="Luis", last_name="Perez", email="luis@sw.co")
+
+        for texto, esperado in (("AROJAS", ana), ("luis", luis), ("perez", luis), ("ana@sw", ana), ("ana rojas", ana)):
+            with self.subTest(texto=texto):
+                self.assertEqual(self.claves(self.listar(buscar=texto)), [esperado.pk])
+        self.assertEqual(self.claves(self.listar(buscar="ana perez")), [])
+
+    def test_filtra_por_rol_y_por_estado(self):
+        recepcion = self.crear(timezone.now(), rol=User.Rol.RECEPCIONISTA)
+        inactivo = self.crear(timezone.now(), is_active=False)
+
+        self.assertEqual(self.claves(self.listar(rol="recepcionista")), [recepcion.pk])
+        self.assertEqual(self.claves(self.listar(activo="false")), [inactivo.pk])
+        self.assertNotIn(inactivo.pk, self.claves(self.listar(activo="true")))
+
+
+class ListaTrazabilidadPaginadaApiTests(PruebasDeListaMixin, APITestCase):
+    url = "/api/usuarios/trazabilidad"
+    con_fecha = True
+
+    def setUp(self):
+        self.client.force_authenticate(
+            User.objects.create_user(username="jefe", password="x", rol=User.Rol.ADMINISTRADOR)
+        )
+
+    def crear(self, cuando, usuario=None, detalle="Cambio de prueba", tipo_usuario=User.Rol.OPERARIO):
+        registro = RegistroAuditoria.objects.create(
+            usuario=usuario,
+            usuario_nombre=usuario.username if usuario else "anonimo",
+            tipo_usuario=tipo_usuario,
+            accion=RegistroAuditoria.Accion.EDITADO,
+            detalle=detalle,
+        )
+        RegistroAuditoria.objects.filter(pk=registro.pk).update(fecha=cuando)
+        return registro
+
+    def test_busca_en_el_detalle_y_en_el_usuario(self):
+        ana = User.objects.create_user(username="arojas", first_name="Ana", last_name="Rojas", password="x")
+        cambio = self.crear(timezone.now() + timedelta(days=1), usuario=ana, detalle="Cambio el telefono")
+        otro = self.crear(timezone.now() + timedelta(days=1), detalle="Desactivo una cuenta")
+
+        de_ana = list(RegistroAuditoria.objects.filter(usuario=ana).order_by("-fecha", "-id").values_list("pk", flat=True))
+
+        self.assertEqual(self.claves(self.listar(buscar="telefono")), [cambio.pk])
+        self.assertEqual(self.claves(self.listar(buscar="cuenta")), [otro.pk])
+        for texto in ("AROJAS", "rojas", "ana rojas"):
+            with self.subTest(texto=texto):
+                self.assertEqual(self.claves(self.listar(buscar=texto)), de_ana)
+        self.assertEqual(self.claves(self.listar(buscar="ana cuenta")), [])
+
+    def test_conserva_el_filtro_por_tipo_de_usuario(self):
+        recepcion = self.crear(timezone.now() + timedelta(days=1), tipo_usuario=User.Rol.RECEPCIONISTA)
+
+        self.assertIsInstance(self.client.get(self.url, {"rol": "recepcionista"}).json(), list)
+        self.assertEqual(self.claves(self.listar(rol="recepcionista", pagina=1)), [recepcion.pk])

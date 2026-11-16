@@ -2,7 +2,15 @@ import { cookies } from "next/headers";
 import Link from "next/link";
 import { redirect } from "next/navigation";
 
-import { getClientes, getCurrentUser, getMateriales, getServicios, getTarifas, getTiposPrenda } from "@/lib/api";
+import {
+  getCurrentUser,
+  getMateriales,
+  getPagina,
+  getServicios,
+  getTarifas,
+  getTiposPrenda,
+  type Cliente,
+} from "@/lib/api";
 import { ClayCard, Encabezado } from "../../components/ui/clay";
 import { tarifasDeHoy } from "../cotizacion";
 import OrdenForm from "./orden-form";
@@ -14,7 +22,8 @@ export default async function NuevaOrdenPage() {
   if (user.rol === "operario") redirect("/ordenes");
 
   const [clientes, tiposPrenda, materiales, servicios, tarifas] = await Promise.all([
-    getClientes(cookieStore),
+    // Solo para saber si ya hay clientes: el selector los busca mientras se escribe.
+    getPagina<Cliente>(cookieStore, "/clientes", "pagina=1&tamano=1"),
     getTiposPrenda(cookieStore),
     getMateriales(cookieStore),
     getServicios(cookieStore),
@@ -36,7 +45,7 @@ export default async function NuevaOrdenPage() {
             No se pudieron cargar los clientes o el catalogo. Verifica que el backend este en ejecucion.
           </p>
         </ClayCard>
-      ) : clientes.length === 0 ? (
+      ) : clientes.total === 0 ? (
         <ClayCard>
           <p className="text-sm text-(--sw-ink-soft)">
             Todavia no hay clientes.{" "}
@@ -48,7 +57,6 @@ export default async function NuevaOrdenPage() {
         </ClayCard>
       ) : (
         <OrdenForm
-          clientes={clientes}
           tiposPrenda={tiposPrenda}
           materiales={materiales}
           servicios={servicios}

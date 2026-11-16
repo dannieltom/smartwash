@@ -1,13 +1,23 @@
 import { cookies } from "next/headers";
 import { redirect } from "next/navigation";
 
-import { getCurrentUser, getMateriales, getNivelesDificultad, getServicios, getTarifas, getTiposPrenda } from "@/lib/api";
+import {
+  consultaDeLista,
+  getCurrentUser,
+  getMateriales,
+  getNivelesDificultad,
+  getPagina,
+  getServicios,
+  getTiposPrenda,
+  type Tarifa,
+} from "@/lib/api";
+import { lectorDe, paginaDesde } from "../components/lista/url";
 import { ClayCard, Encabezado } from "../components/ui/clay";
-import FiltroVigencia from "./filtro-vigencia";
 import MaterialForm from "./material-form";
 import NivelForm from "./nivel-form";
 import ServicioForm from "./servicio-form";
-import TablaTarifas from "./tabla-tarifas";
+import { leerFiltrosTarifas } from "./filtros";
+import ListaTarifas from "./lista-tarifas";
 import { TablaMateriales, TablaNiveles, TablaServicios, TablaTiposPrenda } from "./tabla-catalogo";
 import TarifaForm from "./tarifa-form";
 import TipoPrendaForm from "./tipo-prenda-form";
@@ -25,20 +35,21 @@ function ErrorDeCarga({ recurso }: { recurso: string }) {
 export default async function CatalogoPage({
   searchParams,
 }: {
-  searchParams: Promise<{ vigentes?: string }>;
+  searchParams: Promise<{ [clave: string]: string | string[] | undefined }>;
 }) {
   const cookieStore = await cookies();
   const user = await getCurrentUser(cookieStore);
   if (!user) redirect("/login");
   const puedeEditar = user.rol === "administrador";
 
-  const soloVigentes = (await searchParams).vigentes === "1";
+  const lector = lectorDe(await searchParams);
+  const consultaTarifas = consultaDeLista(leerFiltrosTarifas(lector), paginaDesde(lector));
   const [tiposPrenda, niveles, materiales, servicios, tarifas] = await Promise.all([
     getTiposPrenda(cookieStore),
     getNivelesDificultad(cookieStore),
     getMateriales(cookieStore),
     getServicios(cookieStore),
-    getTarifas(cookieStore, soloVigentes),
+    getPagina<Tarifa>(cookieStore, "/catalogo/tarifas", consultaTarifas),
   ]);
 
   return (
@@ -121,18 +132,6 @@ export default async function CatalogoPage({
           </div>
         </ClayCard>
       )}
-      <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
-        <h2 className="sw-eyebrow">Tarifas generales por servicio</h2>
-        <FiltroVigencia soloVigentes={soloVigentes} />
-      </div>
-      <div className="mb-6">
-        {tarifas === null ? (
-          <ErrorDeCarga recurso="las tarifas" />
-        ) : (
-          <TablaTarifas tarifas={tarifas.filter((t) => t.tipo_prenda === null)} editable={puedeEditar} conTipo={false} />
-        )}
-      </div>
-
       {puedeEditar && (
         <ClayCard className="mb-4">
           <h2 className="sw-eyebrow">Nueva excepcion por tipo de prenda (opcional)</h2>
@@ -141,12 +140,8 @@ export default async function CatalogoPage({
           </div>
         </ClayCard>
       )}
-      <h2 className="sw-eyebrow mb-4">Excepciones por tipo de prenda</h2>
-      {tarifas === null ? (
-        <ErrorDeCarga recurso="las tarifas" />
-      ) : (
-        <TablaTarifas tarifas={tarifas.filter((t) => t.tipo_prenda !== null)} editable={puedeEditar} conTipo />
-      )}
+      <h2 className="sw-eyebrow mb-4">Tarifas</h2>
+      <ListaTarifas inicial={tarifas} consultaInicial={consultaTarifas} editable={puedeEditar} />
     </main>
   );
 }

@@ -23,6 +23,10 @@ from rest_framework.throttling import ScopedRateThrottle, SimpleRateThrottle
 from rest_framework.views import APIView
 from drf_spectacular.utils import extend_schema  # <-- Importamos extend_schema
 
+from core.listas import FECHA, PAGINACION, ListaPaginadaMixin, buscar_por_palabras, filtrar_por_fecha, opcion
+from core.permissions import SoloAdministrador
+from turnos.services import turno_vigente
+
 from .models import RegistroAuditoria, User
 from .serializers import (
     MENSAJE_ULTIMO_ADMIN,
@@ -99,6 +103,8 @@ class LoginView(APIView):
 
 
 class LogoutView(APIView):
+    exento_de_turno = True
+
     @extend_schema(
         request=None,
         responses={204: None},
@@ -114,14 +120,20 @@ class MeView(APIView):
     """Usuario autenticado. Endpoint privado: responde 403 si no hay sesion.
 
     Ademas siembra la cookie csrftoken, que el frontend necesita antes del login.
+    Al operario le dice si tiene turno vigente (`en_turno`).
     """
+
+    exento_de_turno = True
 
     @extend_schema(
         responses={200: UserSerializer},
         summary="Obtener usuario actual",
     )
     def get(self, request):
-        return Response(UserSerializer(request.user).data)
+        datos = UserSerializer(request.user).data
+        if request.user.rol == User.Rol.OPERARIO:
+            datos["en_turno"] = turno_vigente(request.user) is not None
+        return Response(datos)
 
 
 logger = logging.getLogger(__name__)
@@ -237,6 +249,7 @@ class ActuarComoView(APIView):
     """
 
     permission_classes = [IsAuthenticated]
+    exento_de_turno = True
 
     def get(self, request):
         if not settings.DEBUG:
@@ -259,21 +272,41 @@ class ActuarComoView(APIView):
         return Response(UserSerializer(usuario).data)
 
 
-class UsuarioInternoListCreateView(generics.ListCreateAPIView):
+ACTIVO = {"true": True, "false": False}
+
+
+class UsuarioInternoListCreateView(ListaPaginadaMixin, generics.ListCreateAPIView):
+    permission_classes = [SoloAdministrador]
     queryset = get_user_model().objects.all().order_by("username")
+    parametros_de_lista = (*PAGINACION, "rol", "activo")
 
     def get_serializer_class(self):
         return UsuarioAdminSerializer if self.request.method == "GET" else UsuarioInternoSerializer
+
+    def filtrar_lista(self, usuarios, params):
+        rol = opcion(params, "rol", User.Rol.values, "Ese rol no existe.")
+        activo = opcion(params, "activo", ACTIVO, "Usa true o false.")
+        usuarios = buscar_por_palabras(
+            usuarios, params.get("buscar", ""), ("username", "first_name", "last_name", "email")
+        )
+        if rol:
+            usuarios = usuarios.filter(rol=rol)
+        if activo:
+            usuarios = usuarios.filter(is_active=ACTIVO[activo])
+        return usuarios.order_by("-date_joined", "-id")
 
 
 class UsuarioInternoDetailView(generics.RetrieveUpdateAPIView):
     """Sin destroy: la baja es "desactivar", no borrar (ver UsuarioDesactivarView)."""
 
+    permission_classes = [SoloAdministrador]
     queryset = get_user_model().objects.all()
     serializer_class = UsuarioInternoSerializer
 
 
 class UsuarioDesactivarView(APIView):
+    permission_classes = [SoloAdministrador]
+
     def post(self, request, pk):
         usuario = get_object_or_404(get_user_model(), pk=pk)
         if es_ultimo_admin_activo(usuario):
@@ -285,12 +318,9 @@ class UsuarioDesactivarView(APIView):
 
 
 class UsuarioActivarView(APIView):
+    permission_classes = [SoloAdministrador]
+
     def post(self, request, pk):
-        if request.user.rol != User.Rol.ADMINISTRADOR:
-            return Response(
-                {"detail": "Solo un administrador puede activar usuarios."},
-                status=status.HTTP_403_FORBIDDEN,
-            )
         usuario = get_object_or_404(get_user_model(), pk=pk)
         # Sin cambio no se guarda: la senal registraria una edicion vacia.
         if not usuario.is_active:
@@ -301,14 +331,28 @@ class UsuarioActivarView(APIView):
 
 
 class HistorialUsuarioView(generics.ListAPIView):
+    permission_classes = [SoloAdministrador]
     serializer_class = HistorialAccionSerializer
 
     def get_queryset(self):
         return RegistroAuditoria.objects.filter(usuario_id=self.kwargs["pk"])
 
 
-class TrazabilidadView(generics.ListAPIView):
+class TrazabilidadView(ListaPaginadaMixin, generics.ListAPIView):
+    """`rol` solo no pagina, como antes; con buscar, fecha, pagina o tamano responde paginado."""
+
+    permission_classes = [SoloAdministrador]
     serializer_class = AccionAuditoriaSerializer
+    parametros_de_lista = (*PAGINACION, *FECHA)
+    con_anios = "fecha"
+
+    def filtrar_lista(self, registros, params):
+        registros = buscar_por_palabras(
+            registros,
+            params.get("buscar", ""),
+            ("detalle", "usuario_nombre", "usuario__username", "usuario__first_name", "usuario__last_name"),
+        )
+        return filtrar_por_fecha(registros, params, "fecha").order_by("-fecha", "-id")
 
     def get_queryset(self):
         queryset = RegistroAuditoria.objects.all()

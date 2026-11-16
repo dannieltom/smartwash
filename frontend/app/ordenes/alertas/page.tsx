@@ -1,16 +1,24 @@
 import { cookies } from "next/headers";
 import { redirect } from "next/navigation";
 
-import { getAlertasOrdenes, getCurrentUser } from "@/lib/api";
-import { ClayCard, Encabezado } from "../../components/ui/clay";
-import ListaAlertas from "./lista-alertas";
+import { consultaDeLista, getCurrentUser, getPagina, type AlertaOrden } from "@/lib/api";
+import { lectorDe, paginaDesde } from "../../components/lista/url";
+import { Encabezado } from "../../components/ui/clay";
+import AlertasPaginadas from "./alertas-paginadas";
+import { leerFiltrosAlertas } from "./filtros";
 
-export default async function AlertasPage() {
+export default async function AlertasPage({
+  searchParams,
+}: {
+  searchParams: Promise<{ [clave: string]: string | string[] | undefined }>;
+}) {
   const cookieStore = await cookies();
   const user = await getCurrentUser(cookieStore);
   if (!user) redirect("/login");
 
-  const alertas = await getAlertasOrdenes(cookieStore);
+  const lector = lectorDe(await searchParams);
+  const consulta = consultaDeLista(leerFiltrosAlertas(lector), paginaDesde(lector));
+  const inicial = await getPagina<AlertaOrden>(cookieStore, "/ordenes/alertas", consulta);
 
   return (
     <main className="mx-auto max-w-4xl px-4 py-8 sm:px-8 sm:py-12">
@@ -18,16 +26,7 @@ export default async function AlertasPage() {
         Ordenes retrasadas y proximas a su fecha estimada de entrega.
       </Encabezado>
 
-      {alertas === null ? (
-        <ClayCard>
-          <p className="text-sm text-(--sw-ink-soft)">
-            No se pudieron cargar las alertas. Verifica que el backend este en
-            ejecucion.
-          </p>
-        </ClayCard>
-      ) : (
-        <ListaAlertas alertas={alertas} />
-      )}
+      <AlertasPaginadas inicial={inicial} consultaInicial={consulta} />
     </main>
   );
 }

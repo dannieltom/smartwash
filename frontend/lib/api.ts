@@ -4,6 +4,8 @@
 // backend con el rewrite de next.config.ts, asi que la cookie de sesion viaja
 // sola. En el servidor hay que reenviar las cookies a mano.
 
+import { redirect } from "next/navigation";
+
 export type Rol = "administrador" | "recepcionista" | "operario";
 
 /** Lo que devuelve UserSerializer en el backend. */
@@ -14,7 +16,19 @@ export type User = {
   first_name: string;
   last_name: string;
   rol: Rol;
+  /** Solo para operarios: si tiene turno vigente (HU10). */
+  en_turno?: boolean;
 };
+
+/** El backend responde 403 con este codigo a un operario que no ha iniciado turno. */
+export const CODIGO_SIN_TURNO = "turno_no_iniciado";
+export const RUTA_TURNO = "/turno";
+
+async function esSinTurno(response: Response): Promise<boolean> {
+  if (response.status !== 403) return false;
+  const data: unknown = await response.clone().json().catch(() => null);
+  return typeof data === "object" && data !== null && "codigo" in data && data.codigo === CODIGO_SIN_TURNO;
+}
 
 type Metodo = "GET" | "POST" | "PUT" | "PATCH" | "DELETE";
 
@@ -54,11 +68,17 @@ export async function api(
     headers["X-CSRFToken"] = readCookie("csrftoken") ?? "";
   }
 
-  return fetch(`/api${path}`, {
+  const response = await fetch(`/api${path}`, {
     method,
     headers,
     body: body === undefined ? undefined : JSON.stringify(body),
   });
+  // El turno pudo terminar (o cerrarse solo a medianoche) con la pantalla abierta.
+  if (await esSinTurno(response)) {
+    // eslint-disable-next-line @next/next/no-location-assign-relative-destination -- fuera de un componente no hay router; la recarga descarta la pantalla que ya no se puede usar
+    window.location.href = RUTA_TURNO;
+  }
+  return response;
 }
 
 /** Errores de validacion de DRF por campo. `detail` llega en 403/404 y similares;
@@ -81,20 +101,28 @@ export async function leerErroresApi(response: Response): Promise<ErroresApi> {
  * Devuelve null tambien si el backend no responde. Sin esto, un Django caido
  * hace que fetch lance y la pagina entera falle con 500; asi el usuario cae en
  * /login, que al menos es una pantalla util.
+ *
+ * Un operario sin turno vigente va a /turno: es el unico punto que lo exige en
+ * las paginas. Solo /turno y la barra de navegacion lo leen con `permitirSinTurno`.
  */
 export async function getCurrentUser(
   cookieStore: CookieStore,
+  { permitirSinTurno = false }: { permitirSinTurno?: boolean } = {},
 ): Promise<User | null> {
   const backend = process.env.BACKEND_URL ?? "http://127.0.0.1:8000";
+  let usuario: User | null = null;
   try {
     const response = await fetch(`${backend}/api/auth/me`, {
       headers: { cookie: cookieStore.toString() },
       cache: "no-store",
     });
-    return response.ok ? ((await response.json()) as User) : null;
+    usuario = response.ok ? ((await response.json()) as User) : null;
   } catch {
     return null;
   }
+  // redirect() lanza: va fuera del try para que el catch no se lo trague.
+  if (usuario?.rol === "operario" && usuario.en_turno === false && !permitirSinTurno) redirect(RUTA_TURNO);
+  return usuario;
 }
 
 /** Cuentas sembradas para el selector "actuar como". Null si no aplica (prod). */
@@ -121,15 +149,17 @@ async function fetchBackend<T>(
   cookieStore: CookieStore,
 ): Promise<T | null> {
   const backend = process.env.BACKEND_URL ?? "http://127.0.0.1:8000";
+  let response: Response;
   try {
-    const response = await fetch(`${backend}/api${path}`, {
+    response = await fetch(`${backend}/api${path}`, {
       headers: { cookie: cookieStore.toString() },
       cache: "no-store",
     });
-    return response.ok ? ((await response.json()) as T) : null;
   } catch {
     return null;
   }
+  if (await esSinTurno(response)) redirect(RUTA_TURNO);
+  return response.ok ? ((await response.json().catch(() => null)) as T | null) : null;
 }
 
 /* ------------------------------- Clientes (HU05, app clientes) ------------------------------- */
@@ -147,10 +177,6 @@ export type Cliente = {
 };
 
 export type ClienteFormulario = Omit<Cliente, "id" | "clasificacion" | "puntos">;
-
-export async function getClientes(cookieStore: CookieStore): Promise<Cliente[] | null> {
-  return fetchBackend<Cliente[]>("/clientes", cookieStore);
-}
 
 export async function getCliente(id: number, cookieStore: CookieStore): Promise<Cliente | null> {
   return fetchBackend<Cliente>(`/clientes/${id}`, cookieStore);
@@ -204,10 +230,6 @@ export type UsuarioFormulario = {
   rol: Rol;
   password?: string;
 };
-
-export async function getUsuarios(cookieStore: CookieStore): Promise<UsuarioAdmin[] | null> {
-  return fetchBackend<UsuarioAdmin[]>("/usuarios", cookieStore);
-}
 
 export async function getUsuario(
   id: number,
@@ -267,14 +289,6 @@ export type AccionAuditoria = {
   detalle: string;
   fecha: string;
 };
-
-export async function getTrazabilidad(
-  cookieStore: CookieStore,
-  tipoUsuario?: TipoUsuarioAuditoria,
-): Promise<AccionAuditoria[] | null> {
-  const query = tipoUsuario ? `?rol=${encodeURIComponent(tipoUsuario)}` : "";
-  return fetchBackend<AccionAuditoria[]>(`/usuarios/trazabilidad${query}`, cookieStore);
-}
 
 /* --------------------------- Catalogo de servicios y tarifas (HU07) --------------------------- */
 
@@ -516,6 +530,8 @@ export type Orden = {
   /** Lo pagado de mas por los descuentos; se devuelve al entregar. */
   saldo_a_favor: string;
   motivo_cancelacion: string;
+  /** Satisfaccion del cliente (EP06), o null si no la ha dado. */
+  calificacion: CalificacionPublica | null;
 };
 
 /** Una linea de prenda tal como la recibe POST /ordenes y POST /ordenes/{id}/prendas. */
@@ -531,8 +547,46 @@ export type PrendaFormulario = {
   servicios: number[];
 };
 
-export async function getOrdenes(cookieStore: CookieStore): Promise<Orden[] | null> {
-  return fetchBackend<Orden[]>("/ordenes", cookieStore);
+/* ------------------------------- Listas paginadas (comunes) ------------------------------- */
+
+export const POR_PAGINA = 20;
+
+/** Respuesta paginada de una lista: la mas reciente primero (salvo alertas y tarifas). `anios`
+ * llega en las listas con filtro de fecha: los anos con registros, para el selector de ano. */
+export type Pagina<T> = {
+  total: number;
+  pagina: number;
+  paginas: number;
+  tamano: number;
+  anios?: number[];
+  resultados: T[];
+};
+
+/** Filtros de una lista tal como viajan en la URL y hacia la API (?buscar=...&estado=...). */
+export type Filtros = Record<string, string>;
+
+/** Solo los filtros con valor; `pagina` y `tamano` van siempre para recibir la respuesta paginada. */
+export function consultaDeLista(filtros: Filtros, pagina: number, tamano = POR_PAGINA): string {
+  const params = new URLSearchParams();
+  for (const [clave, valor] of Object.entries(filtros)) {
+    if (valor.trim()) params.set(clave, valor.trim());
+  }
+  params.set("pagina", String(pagina));
+  params.set("tamano", String(tamano));
+  return params.toString();
+}
+
+/** R permite respuestas paginadas con datos extra, como el promedio de las calificaciones. */
+export async function getPagina<T, R extends Pagina<T> = Pagina<T>>(
+  cookieStore: CookieStore,
+  ruta: string,
+  consulta: string,
+): Promise<R | null> {
+  return fetchBackend<R>(`${ruta}?${consulta}`, cookieStore);
+}
+
+export async function buscarPagina(ruta: string, consulta: string): Promise<Response> {
+  return api(`${ruta}?${consulta}`);
 }
 
 export type TipoEventoOrden =
@@ -608,10 +662,6 @@ export type AlertaOrden = {
 
 /** Ordenes retrasadas o proximas a vencer (HU16). Al operario el backend le
  * devuelve solo las suyas. */
-export async function getAlertasOrdenes(cookieStore: CookieStore): Promise<AlertaOrden[] | null> {
-  return fetchBackend<AlertaOrden[]>("/ordenes/alertas", cookieStore);
-}
-
 export async function crearOrden(cliente: number, prendas: PrendaFormulario[]): Promise<Response> {
   return api("/ordenes", { method: "POST", body: { cliente, prendas } });
 }
@@ -672,9 +722,38 @@ export type Novedad = {
   foto_url: string | null;
   decision: DecisionNovedad | null;
   decision_observacion: string;
+  decidida_por_nombre: string | null;
+  decidida_en: string | null;
   gravedad: Gravedad | "";
   porcentaje_descuento: string | null;
   monto_descuento: string;
+};
+
+/** GET /novedades (administrador y recepcionista): todas, la mas reciente primero. "pendiente" es
+ * lo mismo que muestra la bandeja de ordenes con novedad; lo demas, "resuelta". */
+export type NovedadHistorial = Pick<
+  Novedad,
+  | "id"
+  | "prenda_nombre"
+  | "descripcion"
+  | "origen"
+  | "origen_nombre"
+  | "creado_en"
+  | "foto_url"
+  | "decision"
+  | "decision_observacion"
+  | "decidida_por_nombre"
+  | "decidida_en"
+  | "gravedad"
+  | "porcentaje_descuento"
+  | "monto_descuento"
+> & {
+  orden_id: number;
+  orden_codigo: string;
+  cliente_nombre: string;
+  registrada_por: string | null;
+  estado: "pendiente" | "resuelta";
+  decision_nombre: string | null;
 };
 
 /** Las del proceso: continuar o agregar_servicio (reprocesar y no_continuar solo
@@ -771,10 +850,85 @@ export async function cambiarEstadoOrden(id: number, estado: EstadoOrden): Promi
 }
 
 /** Lo que devuelve OperarioSerializer. /operarios lista solo los activos. */
-export type Operario = { id: number; username: string; nombre: string };
+/** Operario activo con su carga (HU10): las mismas ordenes y prendas que ve en su bandeja.
+ * `recomendado` marca a lo sumo uno: el de menos prendas entre los que estan en turno. */
+export type Operario = {
+  id: number;
+  username: string;
+  nombre: string;
+  en_turno: boolean;
+  ordenes_activas: number;
+  prendas_activas: number;
+  recomendado: boolean;
+};
 
 export async function getOperarios(cookieStore: CookieStore): Promise<Operario[] | null> {
   return fetchBackend<Operario[]>("/operarios", cookieStore);
+}
+
+export type OrdenDeOperario = {
+  id: number;
+  codigo: string;
+  /** Ultima asignacion de la orden; null en ordenes asignadas antes de registrarse. */
+  fecha_asignacion: string | null;
+  cliente_nombre: string;
+  estado: EstadoOrden;
+  total_prendas: number;
+  prendas: { cantidad: number; tipo_prenda: string; servicios: string[] }[];
+};
+
+/** Las ordenes activas de un operario, para ver su carga antes de asignarle otra. */
+export async function getOrdenesDeOperario(id: number): Promise<OrdenDeOperario[] | null> {
+  const response = await api(`/operarios/${id}/ordenes`).catch(() => null);
+  return response?.ok ? ((await response.json()) as OrdenDeOperario[]) : null;
+}
+
+/* ------------------------------- Turnos de operario (HU10) ------------------------------- */
+
+export type EstadoTurno = { en_turno: boolean; inicio: string | null; ordenes_en_curso: number };
+
+export async function getTurnoActual(): Promise<EstadoTurno | null> {
+  const response = await api("/turnos/actual").catch(() => null);
+  return response?.ok ? ((await response.json()) as EstadoTurno) : null;
+}
+
+export async function iniciarTurno(): Promise<Response> {
+  return api("/turnos/iniciar", { method: "POST" });
+}
+
+export async function terminarTurno(): Promise<Response> {
+  return api("/turnos/terminar", { method: "POST" });
+}
+
+export type TurnoRegistrado = {
+  operario: number;
+  operario_nombre: string;
+  inicio: string;
+  fin: string | null;
+  cierre: "manual" | "automatico" | null;
+};
+
+export type EtapaDeTrabajo = {
+  operario: number;
+  operario_nombre: string;
+  orden: number;
+  orden_codigo: string;
+  cliente_nombre: string;
+  estado: "En proceso" | "Control de calidad";
+  inicio: string;
+  fin: string | null;
+};
+
+export type ActividadOperarios = { turnos: TurnoRegistrado[]; etapas: EtapaDeTrabajo[] };
+
+/** Solo el administrador. desde/hasta en ISO con zona; maximo 31 dias. */
+export async function getActividad(
+  cookieStore: CookieStore,
+  filtros: { desde: string; hasta: string; operario?: string },
+): Promise<ActividadOperarios | null> {
+  const params = new URLSearchParams({ desde: filtros.desde, hasta: filtros.hasta });
+  if (filtros.operario) params.set("operario", filtros.operario);
+  return fetchBackend<ActividadOperarios>(`/operarios/actividad?${params}`, cookieStore);
 }
 
 /** HU13: solo recepcionista o administrador, y antes de iniciar el servicio,
@@ -821,14 +975,6 @@ export type DanoPrenda = {
   observacion_pago: string;
   foto_url: string | null;
 };
-
-/** Administrador y recepcionista; el operario recibe 403. */
-export async function getDanos(
-  cookieStore: CookieStore,
-  estado?: DanoPrenda["estado"],
-): Promise<DanoPrenda[] | null> {
-  return fetchBackend<DanoPrenda[]>(estado ? `/danos?estado=${estado}` : "/danos", cookieStore);
-}
 
 /** Solo el administrador; la observacion (por ejemplo, el medio de pago) es obligatoria. */
 export async function pagarDano(id: number, observacion: string): Promise<Response> {
@@ -895,16 +1041,69 @@ export type SeguimientoOrden = {
   fecha_cancelacion: string | null;
   /** Cambios en orden cronologico, con una etiqueta publica (p. ej. "Volvio a proceso"). */
   eventos: { etiqueta: string; fecha: string }[];
+  calificacion: CalificacionPublica | null;
 };
 
 export async function rastrearOrden(codigo: string): Promise<Response> {
   return api(`/ordenes/consulta/${encodeURIComponent(codigo)}`);
 }
 
+/** Una orden en la consulta por cedula (HU17): sin datos del cliente, ids, pagos ni motivos. El
+ * total va en pesos enteros y las prendas agrupadas, sin las danadas o perdidas. */
+export type OrdenDeCliente = {
+  codigo: string;
+  estado: EstadoOrden;
+  total: number;
+  prendas: { cantidad: number; tipo_prenda: string; servicios: string[] }[];
+  /** Solo las estrellas: el comentario se ve al abrir el seguimiento. */
+  calificacion: { estrellas: number } | null;
+};
+
+/** Activas: todo lo que no esta Entregada ni Cancelada. Ambas listas, de la mas reciente a la mas antigua. */
+export type OrdenesDeCliente = { activas: OrdenDeCliente[]; historial: OrdenDeCliente[] };
+
+/** POST para que la cedula y el correo no queden en la URL. Cualquier dato que no coincida
+ * responde el mismo 404, y el backend limita los intentos (429). */
+export async function consultarPorDocumento(documento: string, correo: string): Promise<Response> {
+  return api("/ordenes/consulta-por-documento", { method: "POST", body: { documento, correo } });
+}
+
+/* --------------------------------- Satisfaccion (EP06) --------------------------------- */
+
+export type CalificacionPublica = { estrellas: number; comentario: string };
+
+/** Publico: solo una orden Entregada, una sola vez. 400 con `detail` si no se puede, 404 si el
+ * codigo no existe y 429 si se superan los intentos. */
+export async function calificarOrden(codigo: string, estrellas: number, comentario: string): Promise<Response> {
+  return api(`/ordenes/consulta/${encodeURIComponent(codigo)}/calificacion`, {
+    method: "POST",
+    body: { estrellas, comentario },
+  });
+}
+
+export type CalificacionRegistrada = {
+  orden_id: number;
+  orden_codigo: string;
+  cliente_nombre: string;
+  estrellas: number;
+  comentario: string;
+  creada_en: string;
+};
+
+/** GET /calificaciones (administrador y recepcionista): `promedio` con un decimal, null si no hay. */
+/** GET /calificaciones paginado (administrador y recepcionista): `promedio`, con un decimal o null,
+ * y `total` son de todo lo filtrado, no solo de la pagina. */
+export type PaginaCalificaciones = Pagina<CalificacionRegistrada> & { promedio: number | null };
+
 /* ------------------------------------- PQRS (EP06, publico) ------------------------------------- */
 
+export const TIPOS_PQRS = ["peticion", "queja", "reclamo", "sugerencia"] as const;
+export type TipoPqrs = (typeof TIPOS_PQRS)[number];
+
+/** POST /pqrs: el codigo de la orden es obligatorio salvo en la sugerencia, y la queja solo
+ * aplica a ordenes entregadas. Los errores llegan por campo (400) y el envio esta limitado (429). */
 export type PqrsFormulario = {
-  tipo: "peticion" | "queja" | "reclamo" | "sugerencia";
+  tipo: TipoPqrs;
   nombre: string;
   documento: string;
   correo: string;

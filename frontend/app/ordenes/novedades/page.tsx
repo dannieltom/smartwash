@@ -1,18 +1,62 @@
 import { cookies } from "next/headers";
 import Link from "next/link";
 import { redirect } from "next/navigation";
+import type { ReactNode } from "react";
 
-import { getCurrentUser, getOrden, getOrdenesConNovedad, getServicios, getTarifas } from "@/lib/api";
+import {
+  consultaDeLista,
+  getCurrentUser,
+  getOrden,
+  getOrdenesConNovedad,
+  getPagina,
+  getServicios,
+  getTarifas,
+  type NovedadHistorial,
+} from "@/lib/api";
+import { lectorDe, paginaDesde } from "../../components/lista/url";
 import { ClayCard, Encabezado, clayBtnClass } from "../../components/ui/clay";
 import DecisionProceso from "../[id]/decision-proceso";
 import { tarifasDeHoy } from "../cotizacion";
 import NovedadesOrden from "../[id]/novedades-orden";
+import { leerFiltrosHistorial } from "./filtros";
+import HistorialNovedades from "./historial";
+import PestanasNovedades, { type Vista } from "./pestanas";
 
-export default async function OrdenesConNovedadPage() {
+function Marco({ vista, children }: { vista: Vista; children: ReactNode }) {
+  return (
+    <main className="mx-auto max-w-4xl px-4 py-8 sm:px-8 sm:py-12">
+      <Encabezado eyebrow="Incidencias · HU19" titulo="Ordenes con novedad">
+        Ordenes detenidas hasta que el cliente decida. Contactalo por el medio que ya usa y registra aqui lo que
+        decidio. El historial reune todas las novedades, resueltas o no.
+      </Encabezado>
+      <PestanasNovedades activa={vista} />
+      <div role="tabpanel" id={`panel-${vista}`} aria-labelledby={`pestana-${vista}`}>
+        {children}
+      </div>
+    </main>
+  );
+}
+
+export default async function OrdenesConNovedadPage({
+  searchParams,
+}: {
+  searchParams: Promise<{ [clave: string]: string | string[] | undefined }>;
+}) {
   const cookieStore = await cookies();
   const user = await getCurrentUser(cookieStore);
   if (!user) redirect("/login");
   if (user.rol === "operario") redirect("/");
+
+  const lector = lectorDe(await searchParams);
+  if (lector.get("vista") === "historial") {
+    const consulta = consultaDeLista(leerFiltrosHistorial(lector), paginaDesde(lector));
+    const inicial = await getPagina<NovedadHistorial>(cookieStore, "/novedades", consulta);
+    return (
+      <Marco vista="historial">
+        <HistorialNovedades inicial={inicial} consultaInicial={consulta} />
+      </Marco>
+    );
+  }
 
   const [ordenes, servicios, tarifas] = await Promise.all([
     getOrdenesConNovedad(cookieStore),
@@ -24,12 +68,7 @@ export default async function OrdenesConNovedadPage() {
   const tarifasVigentes = tarifas ? tarifasDeHoy(tarifas) : null;
 
   return (
-    <main className="mx-auto max-w-4xl px-4 py-8 sm:px-8 sm:py-12">
-      <Encabezado eyebrow="Incidencias · HU19" titulo="Ordenes con novedad">
-        Ordenes detenidas hasta que el cliente decida. Contactalo por el medio que ya usa y registra aqui lo que
-        decidio.
-      </Encabezado>
-
+    <Marco vista="pendientes">
       {ordenes === null ? (
         <ClayCard>
           <p className="text-sm text-(--sw-ink-soft)">
@@ -80,6 +119,6 @@ export default async function OrdenesConNovedadPage() {
           </section>
         ))
       )}
-    </main>
+    </Marco>
   );
 }

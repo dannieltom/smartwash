@@ -25,3 +25,5 @@ Un pago parcial no cuenta como etapa completada, así que los tramos de línea q
 ## Qué no se expone
 
 Es un endpoint público. La etapa de pago trae solo `estado_pago`, `abonado`, `total` y `fecha`. No incluye métodos de pago, referencias, notas, quién registró el pago ni ids. Fuera de la etapa de pago, la respuesta no trae montos.
+
+La respuesta también trae `calificacion` (la satisfacción del cliente) y existe una consulta por cédula y correo: ver [rastreo-pqrs-satisfaccion.md](rastreo-pqrs-satisfaccion.md).

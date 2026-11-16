@@ -6,26 +6,25 @@ import { useState, type FormEvent } from "react";
 import { AlertaErrores } from "@/app/catalogo/errores";
 import { crearOrden, type Cliente, type Material, type Orden, type Servicio, type Tarifa, type TipoPrenda } from "@/lib/api";
 import { formatCOP } from "@/lib/format";
-import { ClayButton, ClayCard, ClayField, ClaySelect } from "../../components/ui/clay";
+import { ClayButton, ClayCard } from "../../components/ui/clay";
 import { aFormularios, erroresDeServicios, lineaVacia, nombresDeUnidades, subtotalEstimado, type LineaEditable } from "../cotizacion";
 import { mensajesDeOrden } from "../errores";
 import LineaPrenda from "../linea-prenda";
+import SelectorCliente from "./selector-cliente";
 
 export default function OrdenForm({
-  clientes,
   tiposPrenda,
   materiales,
   servicios,
   tarifas,
 }: {
-  clientes: Cliente[];
   tiposPrenda: TipoPrenda[];
   materiales: Material[];
   servicios: Servicio[];
   tarifas: Tarifa[];
 }) {
   const router = useRouter();
-  const [cliente, setCliente] = useState("");
+  const [cliente, setCliente] = useState<Cliente | null>(null);
   const [lineas, setLineas] = useState<LineaEditable[]>(() => [lineaVacia()]);
   const [errores, setErrores] = useState<string[]>([]);
   const [pending, setPending] = useState(false);
@@ -38,6 +37,10 @@ export default function OrdenForm({
 
   async function onSubmit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
+    if (cliente === null) {
+      setErrores(["Elige el cliente de la lista."]);
+      return;
+    }
     const faltantes = erroresDeServicios(lineas, tiposPrenda);
     if (faltantes.length > 0) {
       setErrores(faltantes);
@@ -46,7 +49,7 @@ export default function OrdenForm({
     setPending(true);
     setErrores([]);
 
-    const response = await crearOrden(Number(cliente), lineas.flatMap(aFormularios)).catch(() => null);
+    const response = await crearOrden(cliente.id, lineas.flatMap(aFormularios)).catch(() => null);
 
     if (response?.ok) {
       const orden = (await response.json()) as Orden;
@@ -60,16 +63,7 @@ export default function OrdenForm({
   return (
     <form onSubmit={onSubmit} className="flex flex-col gap-6">
       <ClayCard>
-        <ClayField label="Cliente">
-          <ClaySelect value={cliente} onChange={(e) => setCliente(e.target.value)} required>
-            <option value="">Selecciona el cliente...</option>
-            {clientes.map((c) => (
-              <option key={c.id} value={c.id}>
-                {c.nombre_completo} · {c.documento}
-              </option>
-            ))}
-          </ClaySelect>
-        </ClayField>
+        <SelectorCliente onElegir={setCliente} />
         <p className="mt-2 text-xs text-(--sw-ink-soft)">
           Si el cliente no aparece, registralo primero en Clientes.
         </p>

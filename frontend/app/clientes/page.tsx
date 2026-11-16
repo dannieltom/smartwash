@@ -1,18 +1,26 @@
 import { cookies } from "next/headers";
 import { redirect } from "next/navigation";
 
-import { getClientes, getCurrentUser } from "@/lib/api";
+import { consultaDeLista, getCurrentUser, getPagina, type Cliente } from "@/lib/api";
+import { lectorDe, paginaDesde } from "../components/lista/url";
 import { ClayCard, Encabezado } from "../components/ui/clay";
 import ClienteForm from "./cliente-form";
-import TablaClientes from "./tabla-clientes";
+import { leerFiltrosClientes } from "./filtros";
+import ListaClientes from "./lista-clientes";
 
-export default async function ClientesPage() {
+export default async function ClientesPage({
+  searchParams,
+}: {
+  searchParams: Promise<{ [clave: string]: string | string[] | undefined }>;
+}) {
   const cookieStore = await cookies();
   const user = await getCurrentUser(cookieStore);
   if (!user) redirect("/login");
   if (user.rol === "operario") redirect("/");
 
-  const clientes = await getClientes(cookieStore);
+  const lector = lectorDe(await searchParams);
+  const consulta = consultaDeLista(leerFiltrosClientes(lector), paginaDesde(lector));
+  const inicial = await getPagina<Cliente>(cookieStore, "/clientes", consulta);
 
   return (
     <main className="mx-auto max-w-5xl px-4 py-8 sm:px-8 sm:py-12">
@@ -25,15 +33,7 @@ export default async function ClientesPage() {
         <ClienteForm className="mt-4" />
       </ClayCard>
 
-      {clientes === null ? (
-        <ClayCard>
-          <p className="text-sm text-(--sw-ink-soft)">
-            No se pudieron cargar los clientes. Verifica que el backend este en ejecucion.
-          </p>
-        </ClayCard>
-      ) : (
-        <TablaClientes clientes={clientes} />
-      )}
+      <ListaClientes inicial={inicial} consultaInicial={consulta} />
     </main>
   );
 }

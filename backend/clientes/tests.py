@@ -1,7 +1,10 @@
 from django.contrib.auth import get_user_model
 from django.db import IntegrityError
 from django.test import TestCase
+from django.utils import timezone
 from rest_framework.test import APITestCase
+
+from core.pruebas import PruebasDeListaMixin
 
 from .models import Cliente
 
@@ -189,3 +192,36 @@ class ClienteApiTests(APITestCase):
             403,
         )
         self.assertEqual(Cliente.objects.count(), 1)
+
+
+class ListaClientesPaginadaApiTests(PruebasDeListaMixin, APITestCase):
+    url = "/api/clientes"
+    invalidos = ({"clasificacion": "Oro"},)
+
+    def setUp(self):
+        self.client.force_authenticate(
+            User.objects.create_user(username="recepcion", password="x", rol=User.Rol.RECEPCIONISTA)
+        )
+        self.numero = 0
+
+    def crear(self, cuando, **campos):
+        self.numero += 1
+        datos = {"documento": f"9000{self.numero:04d}", "nombre_completo": f"Cliente {self.numero}", "telefono": "3000000000"}
+        cliente = Cliente.objects.create(**{**datos, **campos})
+        Cliente.objects.filter(pk=cliente.pk).update(creado_en=cuando)
+        return cliente
+
+    def test_busca_por_nombre_cedula_telefono_y_correo(self):
+        ana = self.crear(timezone.now(), nombre_completo="Ana Gomez", documento="1090123456", correo="ana@x.co")
+        luis = self.crear(timezone.now(), nombre_completo="Luis Perez", telefono="3109998877")
+
+        for texto, esperado in (("gomez", ana), ("123456", ana), ("99988", luis), ("ANA@X", ana), ("luis perez", luis)):
+            with self.subTest(texto=texto):
+                self.assertEqual(self.claves(self.listar(buscar=texto)), [esperado.pk])
+        self.assertEqual(self.claves(self.listar(buscar="ana perez")), [])
+
+    def test_filtra_por_clasificacion(self):
+        self.crear(timezone.now())
+        vip = self.crear(timezone.now(), clasificacion=Cliente.Clasificacion.VIP)
+
+        self.assertEqual(self.claves(self.listar(clasificacion="VIP")), [vip.pk])

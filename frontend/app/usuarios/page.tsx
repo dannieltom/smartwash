@@ -1,18 +1,26 @@
 import { cookies } from "next/headers";
 import { redirect } from "next/navigation";
 
-import { getCurrentUser, getUsuarios } from "@/lib/api";
-import { AvisoPendiente, ClayCard, Encabezado } from "../components/ui/clay";
+import { consultaDeLista, getCurrentUser, getPagina, type UsuarioAdmin } from "@/lib/api";
+import { lectorDe, paginaDesde } from "../components/lista/url";
+import { ClayCard, Encabezado } from "../components/ui/clay";
+import { leerFiltrosUsuarios } from "./filtros";
+import ListaUsuarios from "./lista-usuarios";
 import UsuarioForm from "./usuario-form";
-import TablaUsuarios from "./tabla-usuarios";
 
-export default async function UsuariosPage() {
+export default async function UsuariosPage({
+  searchParams,
+}: {
+  searchParams: Promise<{ [clave: string]: string | string[] | undefined }>;
+}) {
   const cookieStore = await cookies();
   const user = await getCurrentUser(cookieStore);
   if (!user) redirect("/login");
   if (user.rol !== "administrador") redirect("/");
 
-  const usuarios = await getUsuarios(cookieStore);
+  const lector = lectorDe(await searchParams);
+  const consulta = consultaDeLista(leerFiltrosUsuarios(lector), paginaDesde(lector));
+  const inicial = await getPagina<UsuarioAdmin>(cookieStore, "/usuarios", consulta);
 
   return (
     <main className="mx-auto max-w-5xl px-4 py-8 sm:px-8 sm:py-12">
@@ -26,13 +34,7 @@ export default async function UsuariosPage() {
         <UsuarioForm className="mt-4" />
       </ClayCard>
 
-      {usuarios === null ? (
-        <AvisoPendiente>
-          No se pudo cargar la lista de usuarios. Recarga la pagina o intenta de nuevo mas tarde.
-        </AvisoPendiente>
-      ) : (
-        <TablaUsuarios usuarios={usuarios} />
-      )}
+      <ListaUsuarios inicial={inicial} consultaInicial={consulta} />
     </main>
   );
 }

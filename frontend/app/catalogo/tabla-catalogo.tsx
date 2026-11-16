@@ -6,27 +6,32 @@ import type { Material, NivelDificultad, Servicio, TipoPrenda } from "@/lib/api"
 import { ClayButton, ClayCard } from "../components/ui/clay";
 import MaterialForm from "./material-form";
 import NivelForm from "./nivel-form";
+import { BuscadorLocal, useFiltroLocal } from "../components/lista/filtro-local";
 import ServicioForm from "./servicio-form";
 import TipoPrendaForm from "./tipo-prenda-form";
 
 type Columna = { titulo: string; valor: string };
 
 function TablaEditable<T extends { id: number }>({
-  filas,
+  filas: todas,
   editable,
   vacio,
+  buscar,
   columnas,
   formulario,
 }: {
   filas: T[];
   editable: boolean;
   vacio: string;
+  /** Etiqueta del buscador, p. ej. "Buscar servicios". */
+  buscar: string;
   columnas: (fila: T) => Columna[];
   formulario: (fila: T, terminar: () => void) => ReactNode;
 }) {
   const [editandoId, setEditandoId] = useState<number | null>(null);
+  const { texto, setTexto, filtradas: filas } = useFiltroLocal(todas, (fila) => columnas(fila).map((c) => c.valor));
 
-  if (filas.length === 0) {
+  if (todas.length === 0) {
     return (
       <ClayCard>
         <p className="text-sm text-(--sw-ink-soft)">{vacio}</p>
@@ -34,7 +39,21 @@ function TablaEditable<T extends { id: number }>({
     );
   }
 
+  const buscador = <BuscadorLocal etiqueta={buscar} texto={texto} onCambiar={setTexto} />;
+  if (filas.length === 0) {
+    return (
+      <>
+        {buscador}
+        <ClayCard>
+          <p className="text-sm text-(--sw-ink-soft)">Ninguna fila coincide con la búsqueda.</p>
+        </ClayCard>
+      </>
+    );
+  }
+
   return (
+    <>
+    {buscador}
     <ClayCard className="overflow-x-auto p-0">
       <table className="sw-tabla w-full text-left text-sm">
         <thead>
@@ -96,6 +115,7 @@ function TablaEditable<T extends { id: number }>({
         </tbody>
       </table>
     </ClayCard>
+    </>
   );
 }
 
@@ -105,6 +125,7 @@ export function TablaTiposPrenda({ tiposPrenda, editable }: { tiposPrenda: TipoP
       filas={tiposPrenda}
       editable={editable}
       vacio="Todavia no hay tipos de prenda."
+      buscar="Buscar tipos de prenda"
       columnas={(tipo) => [
         { titulo: "Tipo de prenda", valor: tipo.nombre },
         { titulo: "Peso estandar", valor: tipo.peso_estandar ? `${Number(tipo.peso_estandar)} kg` : "" },
@@ -120,6 +141,7 @@ export function TablaNiveles({ niveles, editable }: { niveles: NivelDificultad[]
       filas={niveles}
       editable={editable}
       vacio="Todavia no hay niveles de dificultad."
+      buscar="Buscar niveles de dificultad"
       columnas={(nivel) => [
         { titulo: "Nivel de dificultad", valor: nivel.nombre },
         { titulo: "Factor", valor: `x${Number(nivel.factor)}` },
@@ -143,6 +165,7 @@ export function TablaMateriales({
       filas={materiales}
       editable={editable}
       vacio="Todavia no hay materiales."
+      buscar="Buscar materiales"
       columnas={(material) => [
         { titulo: "Material", valor: material.nombre },
         { titulo: "Nivel de dificultad", valor: material.nivel_dificultad_nombre },
@@ -161,6 +184,7 @@ export function TablaServicios({ servicios, editable }: { servicios: Servicio[];
       filas={servicios}
       editable={editable}
       vacio="Todavia no hay servicios."
+      buscar="Buscar servicios"
       columnas={(servicio) => [
         { titulo: "Servicio", valor: servicio.nombre },
         { titulo: "Descripcion", valor: servicio.descripcion },

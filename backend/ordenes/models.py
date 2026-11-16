@@ -11,7 +11,7 @@ from django.utils.crypto import get_random_string
 from catalogo.models import Material, Tarifa, TipoPrenda, redondear_a_100
 from clientes.models import Cliente
 from core.models import ModeloConAutoria
-from fidelizacion.models import ReglaDescuento
+from fidelizacion.models import Promocion, ReglaDescuento
 
 PORCENTAJE_ABONO = Decimal("30")
 # Sin 0/O ni 1/I: el codigo se dicta por telefono y se copia a mano.
@@ -202,6 +202,10 @@ class Orden(ModeloConAutoria):
     def total_pagado(self):
         if self.pk is None:
             return Decimal("0")
+        # Los listados lo anotan en la misma consulta para no hacer una suma por orden.
+        anotado = getattr(self, "total_pagado_anotado", None)
+        if anotado is not None:
+            return anotado
         return self.pagos.aggregate(total=Sum("monto"))["total"] or Decimal("0")
 
     def saldo_pendiente(self):
@@ -241,8 +245,10 @@ class Orden(ModeloConAutoria):
         """Valor y abono a partir de las lineas. No guarda."""
         lineas = OrdenServicio.objects.filter(prenda__orden=self)
         self.subtotal = lineas.aggregate(total=Sum("valor_aplicado"))["total"] or Decimal("0")
-        self.descuento = ReglaDescuento.objects.mayor_descuento(
-            self.cliente, self.subtotal, timezone.localdate()
+        hoy = timezone.localdate()
+        self.descuento = max(
+            ReglaDescuento.objects.mayor_descuento(self.cliente, self.subtotal, hoy),
+            Promocion.objects.mayor_descuento(self.cliente, self.subtotal, hoy),
         )
         self.aplicar_descuentos_por_incidencia()
         if not self.tiene_abono():
@@ -291,6 +297,15 @@ def clasificacion_por_consumo(cliente):
     else:
         calculada = Cliente.Clasificacion.OCASIONAL
     return max(cliente.clasificacion, calculada, key=RANGO_CLASIFICACION.index)
+
+
+# Lo que no esta en la bandeja del operario: sus "ordenes activas" son todas las demas.
+# Sin operario no hay "En espera"; se excluye igual por si un camino futuro lo permite.
+ESTADOS_FUERA_DE_BANDEJA = (
+    Orden.Estado.EN_ESPERA,
+    Orden.Estado.ENTREGADA,
+    Orden.Estado.CANCELADA,
+)
 
 
 class Prenda(ModeloConAutoria):
@@ -724,15 +739,26 @@ class Comprobante(models.Model):
 
 
 class Queja(ModeloConAutoria):
-    """Queja postventa que deja el cliente desde el formulario publico de PQRS.
+    """Solicitud que deja el cliente desde el formulario publico de PQRS.
 
-    Nace pendiente: la recepcionista la gestiona a mano.
+    Nace pendiente: la recepcionista la gestiona a mano. Solo la sugerencia puede
+    llegar sin orden.
     """
+
+    class Tipo(models.TextChoices):
+        PETICION = "peticion", "Peticion"
+        QUEJA = "queja", "Queja"
+        RECLAMO = "reclamo", "Reclamo"
+        SUGERENCIA = "sugerencia", "Sugerencia"
 
     class Estado(models.TextChoices):
         PENDIENTE = "Pendiente", "Pendiente"
 
-    orden = models.ForeignKey(Orden, on_delete=models.PROTECT, related_name="quejas")
+    # Default queja: las filas anteriores a los cuatro tipos eran todas quejas.
+    tipo = models.CharField(max_length=20, choices=Tipo.choices, default=Tipo.QUEJA)
+    orden = models.ForeignKey(
+        Orden, on_delete=models.PROTECT, null=True, blank=True, related_name="quejas"
+    )
     nombre = models.CharField(max_length=150)
     documento = models.CharField(max_length=20)
     correo = models.EmailField(max_length=150)
@@ -744,4 +770,5 @@ class Queja(ModeloConAutoria):
         ordering = ("creado_en", "id")
 
     def __str__(self):
-        return f"{self.orden.codigo} · {self.nombre} · {self.get_estado_display()}"
+        orden = self.orden.codigo if self.orden_id else "sin orden"
+        return f"{self.get_tipo_display()} · {orden} · {self.nombre} · {self.get_estado_display()}"
