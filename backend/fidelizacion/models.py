@@ -158,3 +158,56 @@ class SegmentoPromocion(models.Model):
 
     def __str__(self):
         return f"{self.promocion} · {self.clasificacion}"
+
+
+class ReglaInactividad(ModeloConAutoria):
+    """Cliente sin ordenes durante `dias_sin_compra` recibe `puntos` de bonificacion."""
+
+    nombre = models.CharField(max_length=120)
+    dias_sin_compra = models.PositiveIntegerField()
+    puntos = models.PositiveIntegerField()
+    activa = models.BooleanField(default=True)
+
+    class Meta:
+        ordering = ("dias_sin_compra", "nombre")
+        verbose_name = "regla de inactividad"
+        verbose_name_plural = "reglas de inactividad"
+        constraints = [
+            models.CheckConstraint(
+                condition=models.Q(dias_sin_compra__gte=1),
+                name="regla_inactividad_dias_positivos",
+            ),
+            models.CheckConstraint(
+                condition=models.Q(puntos__gte=1), name="regla_inactividad_puntos_positivos"
+            ),
+        ]
+
+    def __str__(self):
+        return self.nombre
+
+
+class BeneficioInactividad(models.Model):
+    """Puntos ya otorgados. `ultima_actividad` identifica el periodo de inactividad:
+    mientras el cliente no vuelva a comprar, una regla no se paga dos veces."""
+
+    cliente = models.ForeignKey(
+        Cliente, on_delete=models.PROTECT, related_name="beneficios_inactividad"
+    )
+    regla = models.ForeignKey(
+        ReglaInactividad, on_delete=models.PROTECT, related_name="beneficios"
+    )
+    puntos = models.PositiveIntegerField()
+    ultima_actividad = models.DateField()
+    otorgado_en = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ("-otorgado_en", "-id")
+        constraints = [
+            models.UniqueConstraint(
+                fields=("cliente", "regla", "ultima_actividad"),
+                name="beneficio_inactividad_unico_por_periodo",
+            ),
+        ]
+
+    def __str__(self):
+        return f"{self.cliente} · {self.regla} · +{self.puntos}"

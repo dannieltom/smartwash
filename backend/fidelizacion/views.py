@@ -1,6 +1,7 @@
 from django.shortcuts import get_object_or_404
 from django.utils import timezone
 from rest_framework import generics
+from rest_framework import status
 from rest_framework.exceptions import ValidationError
 from rest_framework.response import Response
 from rest_framework.views import APIView
@@ -8,8 +9,22 @@ from rest_framework.views import APIView
 from clientes.models import Cliente
 from core.permissions import AdministradorORecepcionista, SoloAdministrador
 
-from .models import Promocion, ReglaDescuento
-from .serializers import PromocionSerializer, ReglaDescuentoSerializer
+from .models import Promocion, ReglaDescuento, ReglaInactividad
+from .serializers import (
+    ClienteInactivoSerializer,
+    PromocionSerializer,
+    ReglaDescuentoSerializer,
+    ReglaInactividadSerializer,
+)
+from .services import (
+    ProcesoInactividadFallido,
+    SinReglasDeInactividad,
+    asignar_beneficios_por_inactividad,
+    clientes_inactivos,
+)
+
+MENSAJE_SIN_REGLAS = "Configura al menos una regla de inactividad activa."
+MENSAJE_PROCESO_FALLIDO = "No se pudo completar el proceso. No se aplico ningun cambio."
 
 
 class ReglaDescuentoListCreateView(generics.ListCreateAPIView):
@@ -54,3 +69,49 @@ class PromocionesDisponiblesView(APIView):
         return Response(
             PromocionSerializer(promociones, many=True, context={"request": request}).data
         )
+
+
+class ReglaInactividadListCreateView(generics.ListCreateAPIView):
+    permission_classes = [SoloAdministrador]
+    queryset = ReglaInactividad.objects.all()
+    serializer_class = ReglaInactividadSerializer
+
+
+class ReglaInactividadDetailView(generics.RetrieveUpdateAPIView):
+    permission_classes = [SoloAdministrador]
+    queryset = ReglaInactividad.objects.all()
+    serializer_class = ReglaInactividadSerializer
+
+
+class ClientesInactivosView(APIView):
+    """Inactivos segun el periodo mas corto entre las reglas activas."""
+
+    permission_classes = [SoloAdministrador]
+
+    def get(self, request):
+        periodos = ReglaInactividad.objects.filter(activa=True).values_list(
+            "dias_sin_compra", flat=True
+        )
+        if not periodos:
+            return Response({"detail": MENSAJE_SIN_REGLAS}, status=status.HTTP_409_CONFLICT)
+        inactivos = clientes_inactivos(min(periodos))
+        datos = [
+            {"cliente": cliente, "ultima_actividad": ultima, "dias_inactivo": dias}
+            for cliente, ultima, dias in inactivos
+        ]
+        return Response(ClienteInactivoSerializer(datos, many=True).data)
+
+
+class AsignarBeneficiosInactividadView(APIView):
+    permission_classes = [SoloAdministrador]
+
+    def post(self, request):
+        try:
+            resultado = asignar_beneficios_por_inactividad()
+        except SinReglasDeInactividad:
+            return Response({"detail": MENSAJE_SIN_REGLAS}, status=status.HTTP_409_CONFLICT)
+        except ProcesoInactividadFallido:
+            return Response(
+                {"detail": MENSAJE_PROCESO_FALLIDO}, status=status.HTTP_503_SERVICE_UNAVAILABLE
+            )
+        return Response(resultado)

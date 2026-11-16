@@ -1,7 +1,10 @@
-from datetime import date, timedelta
+from datetime import date, datetime, time, timedelta
+from io import StringIO
+from unittest import mock
 from decimal import Decimal
 
 from django.contrib.auth import get_user_model
+from django.core.management import CommandError, call_command
 from django.db import IntegrityError
 from django.test import SimpleTestCase, TestCase, override_settings
 from django.utils import timezone
@@ -9,7 +12,16 @@ from rest_framework.test import APITestCase
 
 from clientes.models import Cliente
 
-from .models import Promocion, ReglaDescuento, puntos_por_consumo
+from ordenes.models import Orden
+
+from .models import (
+    BeneficioInactividad,
+    Promocion,
+    ReglaDescuento,
+    ReglaInactividad,
+    puntos_por_consumo,
+)
+from .services import clientes_inactivos
 
 User = get_user_model()
 
@@ -399,6 +411,300 @@ class PromocionDescuentoTests(TestCase):
         self.assertEqual(
             Promocion.objects.mayor_descuento(self.vip, Decimal("20000"), self.hoy), Decimal("0")
         )
+
+
+class InactividadBase(APITestCase):
+    def setUp(self):
+        self.hoy = timezone.localdate()
+        self.admin = User.objects.create_user(
+            username="admin", password="x", rol=User.Rol.ADMINISTRADOR
+        )
+        self.recepcion = User.objects.create_user(
+            username="recep", password="x", rol=User.Rol.RECEPCIONISTA
+        )
+        self.contador = 0
+
+    def hace(self, dias):
+        dia = self.hoy - timedelta(days=dias)
+        return timezone.make_aware(datetime.combine(dia, time(12, 0)))
+
+    def cliente(self, registrado_hace=400, ultima_orden_hace=None, estado=Orden.Estado.EN_ESPERA):
+        self.contador += 1
+        cliente = Cliente.objects.create(
+            documento=str(self.contador), nombre_completo=f"Cliente {self.contador}", telefono="300"
+        )
+        Cliente.objects.filter(pk=cliente.pk).update(creado_en=self.hace(registrado_hace))
+        if ultima_orden_hace is not None:
+            orden = Orden.objects.create(
+                codigo=f"OR-{self.contador}", cliente=cliente, recepcionista=self.recepcion, estado=estado
+            )
+            Orden.objects.filter(pk=orden.pk).update(creado_en=self.hace(ultima_orden_hace))
+        return cliente
+
+    def regla(self, dias=30, puntos=50, **extra):
+        return ReglaInactividad.objects.create(
+            nombre=f"Regla {dias}", dias_sin_compra=dias, puntos=puntos, **extra
+        )
+
+    def puntos(self, cliente):
+        cliente.refresh_from_db()
+        return cliente.puntos
+
+
+class ClientesInactivosTests(InactividadBase):
+    def test_detecta_a_quien_lleva_el_periodo_sin_ordenes_y_no_a_quien_compro(self):
+        inactivo = self.cliente(ultima_orden_hace=45)
+        self.cliente(ultima_orden_hace=5)
+
+        resultado = clientes_inactivos(30)
+
+        self.assertEqual([c.pk for c, _, _ in resultado], [inactivo.pk])
+        self.assertEqual(resultado[0][2], 45)
+
+    def test_el_dia_exacto_del_periodo_ya_es_inactivo_y_el_anterior_no(self):
+        justo = self.cliente(ultima_orden_hace=30)
+        self.cliente(ultima_orden_hace=29)
+
+        self.assertEqual([c.pk for c, _, _ in clientes_inactivos(30)], [justo.pk])
+
+    def test_cuenta_la_orden_mas_reciente_y_no_la_primera(self):
+        cliente = self.cliente(ultima_orden_hace=100)
+        orden = Orden.objects.create(codigo="OR-NUEVA", cliente=cliente, recepcionista=self.recepcion)
+        Orden.objects.filter(pk=orden.pk).update(creado_en=self.hace(3))
+
+        self.assertEqual(clientes_inactivos(30), [])
+
+    def test_una_orden_cancelada_no_cuenta_como_actividad(self):
+        cliente = self.cliente(ultima_orden_hace=2, estado=Orden.Estado.CANCELADA)
+
+        self.assertEqual([c.pk for c, _, _ in clientes_inactivos(30)], [cliente.pk])
+
+    def test_quien_nunca_compro_cuenta_desde_que_se_registro(self):
+        antiguo = self.cliente(registrado_hace=60)
+        self.cliente(registrado_hace=3)
+
+        self.assertEqual([c.pk for c, _, _ in clientes_inactivos(30)], [antiguo.pk])
+
+    def test_ordena_del_mas_inactivo_al_menos(self):
+        reciente = self.cliente(ultima_orden_hace=40)
+        antiguo = self.cliente(ultima_orden_hace=90)
+
+        self.assertEqual([c.pk for c, _, _ in clientes_inactivos(30)], [antiguo.pk, reciente.pk])
+
+
+class ReglaInactividadApiTests(InactividadBase):
+    RUTA = "/api/fidelizacion/reglas-inactividad"
+
+    def setUp(self):
+        super().setUp()
+        self.client.login(username="admin", password="x")
+
+    def test_crea_una_regla_con_autoria(self):
+        response = self.client.post(
+            self.RUTA, {"nombre": "Un mes", "dias_sin_compra": 30, "puntos": 100}, format="json"
+        )
+
+        self.assertEqual(response.status_code, 201)
+        regla = ReglaInactividad.objects.get()
+        self.assertTrue(regla.activa)
+        self.assertEqual(regla.creado_por, self.admin)
+
+    def test_rechaza_periodo_o_puntos_menores_a_uno(self):
+        for campo in ("dias_sin_compra", "puntos"):
+            with self.subTest(campo=campo):
+                datos = {"nombre": "x", "dias_sin_compra": 30, "puntos": 10, campo: 0}
+                response = self.client.post(self.RUTA, datos, format="json")
+
+                self.assertEqual(response.status_code, 400)
+                self.assertIn(campo, response.json())
+        self.assertFalse(ReglaInactividad.objects.exists())
+
+    def test_edita_y_desactiva_una_regla(self):
+        regla = self.regla()
+
+        response = self.client.patch(
+            f"{self.RUTA}/{regla.id}", {"puntos": 80, "activa": False}, format="json"
+        )
+
+        self.assertEqual(response.status_code, 200)
+        regla.refresh_from_db()
+        self.assertEqual((regla.puntos, regla.activa), (80, False))
+        self.assertEqual(regla.actualizado_por, self.admin)
+
+    def test_solo_el_administrador_las_gestiona(self):
+        regla = self.regla()
+        self.client.login(username="recep", password="x")
+
+        self.assertEqual(self.client.get(self.RUTA).status_code, 403)
+        self.assertEqual(
+            self.client.post(
+                self.RUTA, {"nombre": "x", "dias_sin_compra": 30, "puntos": 1}, format="json"
+            ).status_code,
+            403,
+        )
+        self.assertEqual(
+            self.client.patch(f"{self.RUTA}/{regla.id}", {"puntos": 1}, format="json").status_code,
+            403,
+        )
+        self.client.logout()
+        self.assertEqual(self.client.get(self.RUTA).status_code, 403)
+
+
+class ListaClientesInactivosApiTests(InactividadBase):
+    RUTA = "/api/fidelizacion/clientes-inactivos"
+
+    def setUp(self):
+        super().setUp()
+        self.client.login(username="admin", password="x")
+
+    def test_sin_reglas_activas_pide_configurar_el_periodo(self):
+        self.regla(activa=False)
+
+        response = self.client.get(self.RUTA)
+
+        self.assertEqual(response.status_code, 409)
+
+    def test_la_lista_usa_el_periodo_mas_corto_de_las_reglas_activas(self):
+        self.regla(dias=30)
+        self.regla(dias=90)
+        self.regla(dias=7, activa=False)
+        inactivo = self.cliente(ultima_orden_hace=45)
+        self.cliente(ultima_orden_hace=10)
+
+        response = self.client.get(self.RUTA)
+
+        self.assertEqual(response.status_code, 200)
+        datos = response.json()
+        self.assertEqual([c["id"] for c in datos], [inactivo.pk])
+        self.assertEqual(datos[0]["dias_inactivo"], 45)
+        self.assertEqual(datos[0]["ultima_actividad"], str(self.hoy - timedelta(days=45)))
+
+    def test_sin_inactivos_responde_lista_vacia(self):
+        self.regla()
+        self.cliente(ultima_orden_hace=1)
+
+        self.assertEqual(self.client.get(self.RUTA).json(), [])
+
+    def test_solo_el_administrador_la_consulta(self):
+        self.regla()
+        self.client.login(username="recep", password="x")
+
+        self.assertEqual(self.client.get(self.RUTA).status_code, 403)
+
+
+class AsignarBeneficiosInactividadTests(InactividadBase):
+    RUTA = "/api/fidelizacion/clientes-inactivos/asignar-beneficios"
+
+    def setUp(self):
+        super().setUp()
+        self.client.login(username="admin", password="x")
+
+    def test_suma_los_puntos_de_la_regla_a_los_inactivos_y_deja_constancia(self):
+        self.regla(dias=30, puntos=50)
+        inactivo = self.cliente(ultima_orden_hace=45)
+        activo = self.cliente(ultima_orden_hace=5)
+
+        response = self.client.post(self.RUTA)
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json(), {"beneficios": 1, "puntos": 50, "clientes": 1})
+        self.assertEqual(self.puntos(inactivo), 50)
+        self.assertEqual(self.puntos(activo), 0)
+        beneficio = BeneficioInactividad.objects.get()
+        self.assertEqual(beneficio.ultima_actividad, self.hoy - timedelta(days=45))
+
+    def test_no_paga_dos_veces_la_misma_regla_en_el_mismo_periodo_de_inactividad(self):
+        self.regla()
+        cliente = self.cliente(ultima_orden_hace=45)
+
+        self.client.post(self.RUTA)
+        segunda = self.client.post(self.RUTA)
+
+        self.assertEqual(segunda.json(), {"beneficios": 0, "puntos": 0, "clientes": 0})
+        self.assertEqual(self.puntos(cliente), 50)
+
+    def test_si_el_cliente_vuelve_y_se_inactiva_de_nuevo_recibe_otra_vez(self):
+        self.regla()
+        cliente = self.cliente(ultima_orden_hace=45)
+        self.client.post(self.RUTA)
+        BeneficioInactividad.objects.update(ultima_actividad=self.hoy - timedelta(days=200))
+
+        self.client.post(self.RUTA)
+
+        self.assertEqual(self.puntos(cliente), 100)
+
+    def test_varias_reglas_se_suman_segun_el_tiempo_de_inactividad(self):
+        self.regla(dias=30, puntos=50)
+        self.regla(dias=90, puntos=200)
+        medio = self.cliente(ultima_orden_hace=45)
+        largo = self.cliente(ultima_orden_hace=120)
+
+        response = self.client.post(self.RUTA)
+
+        self.assertEqual(response.json(), {"beneficios": 3, "puntos": 300, "clientes": 2})
+        self.assertEqual(self.puntos(medio), 50)
+        self.assertEqual(self.puntos(largo), 250)
+
+    def test_una_regla_inactiva_no_otorga_nada(self):
+        self.regla(activa=False)
+        self.regla(dias=90, puntos=10)
+        cliente = self.cliente(ultima_orden_hace=45)
+
+        self.client.post(self.RUTA)
+
+        self.assertEqual(self.puntos(cliente), 0)
+
+    def test_sin_reglas_activas_no_hace_nada_y_lo_informa(self):
+        cliente = self.cliente(ultima_orden_hace=45)
+
+        response = self.client.post(self.RUTA)
+
+        self.assertEqual(response.status_code, 409)
+        self.assertEqual(self.puntos(cliente), 0)
+        self.assertFalse(BeneficioInactividad.objects.exists())
+
+    def test_si_el_proceso_falla_no_aplica_ningun_cambio_y_registra_el_error(self):
+        self.regla()
+        primero = self.cliente(ultima_orden_hace=60)
+        segundo = self.cliente(ultima_orden_hace=45)
+        original = BeneficioInactividad.objects.get_or_create
+        llamadas = []
+
+        def falla_en_el_segundo(*args, **kwargs):
+            llamadas.append(1)
+            if len(llamadas) == 2:
+                raise RuntimeError("conexion perdida")
+            return original(*args, **kwargs)
+
+        with (
+            mock.patch.object(BeneficioInactividad.objects, "get_or_create", falla_en_el_segundo),
+            self.assertLogs("fidelizacion.services", level="ERROR"),
+        ):
+            response = self.client.post(self.RUTA)
+
+        self.assertEqual(response.status_code, 503)
+        self.assertEqual((self.puntos(primero), self.puntos(segundo)), (0, 0))
+        self.assertFalse(BeneficioInactividad.objects.exists())
+
+    def test_solo_el_administrador_lo_ejecuta(self):
+        self.regla()
+        cliente = self.cliente(ultima_orden_hace=45)
+        self.client.login(username="recep", password="x")
+
+        self.assertEqual(self.client.post(self.RUTA).status_code, 403)
+        self.assertEqual(self.puntos(cliente), 0)
+
+    def test_el_comando_hace_lo_mismo_y_falla_sin_reglas(self):
+        with self.assertRaises(CommandError):
+            call_command("asignar_beneficios_inactividad", stdout=StringIO())
+        self.regla()
+        cliente = self.cliente(ultima_orden_hace=45)
+        salida = StringIO()
+
+        call_command("asignar_beneficios_inactividad", stdout=salida)
+
+        self.assertEqual(self.puntos(cliente), 50)
+        self.assertIn("1 beneficios", salida.getvalue())
 
 
 class PuntosPorConsumoTests(SimpleTestCase):
