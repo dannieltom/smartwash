@@ -4,7 +4,7 @@ from rest_framework import serializers
 
 from clientes.models import Cliente
 
-from .models import Promocion, ReglaDescuento, SegmentoPromocion
+from .models import Promocion, ReglaDescuento, ReglaInactividad, SegmentoPromocion
 
 
 class ReglaDescuentoSerializer(serializers.ModelSerializer):
@@ -132,3 +132,36 @@ class PromocionSerializer(serializers.ModelSerializer):
                 promocion=promocion, clasificacion=clasificacion
             )
         promocion.refresh_from_db()
+
+
+class ReglaInactividadSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = ReglaInactividad
+        fields = ("id", "nombre", "dias_sin_compra", "puntos", "activa")
+        extra_kwargs = {
+            "dias_sin_compra": {"min_value": 1},
+            "puntos": {"min_value": 1},
+        }
+
+    def create(self, validated_data):
+        instancia = ReglaInactividad(**validated_data)
+        instancia.registrar_autoria(self.context["request"].user)
+        instancia.save()
+        return instancia
+
+    def update(self, instance, validated_data):
+        for campo, valor in validated_data.items():
+            setattr(instance, campo, valor)
+        instance.registrar_autoria(self.context["request"].user)
+        instance.save()
+        return instance
+
+
+class ClienteInactivoSerializer(serializers.Serializer):
+    id = serializers.IntegerField(source="cliente.id")
+    nombre_completo = serializers.CharField(source="cliente.nombre_completo")
+    documento = serializers.CharField(source="cliente.documento")
+    clasificacion = serializers.CharField(source="cliente.clasificacion")
+    puntos = serializers.IntegerField(source="cliente.puntos")
+    ultima_actividad = serializers.DateField()
+    dias_inactivo = serializers.IntegerField()
