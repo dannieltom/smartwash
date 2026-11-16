@@ -335,6 +335,67 @@ class UsuarioInternoTests(APITestCase):
         self.assertEqual(response.status_code, 200)
 
 
+class AccesoUsuariosPorRolTests(APITestCase):
+    def setUp(self):
+        self.objetivo = User.objects.create_user(
+            username="operario1", password="x", rol=User.Rol.OPERARIO
+        )
+
+    def iniciar_como(self, rol):
+        User.objects.create_user(username=f"{rol}-sesion", password="x", rol=rol)
+        self.client.login(username=f"{rol}-sesion", password="x")
+
+    def test_recepcionista_y_operario_no_ven_ni_cambian_usuarios(self):
+        for rol in (User.Rol.RECEPCIONISTA, User.Rol.OPERARIO):
+            with self.subTest(rol=rol):
+                self.iniciar_como(rol)
+                ruta = f"/api/usuarios/{self.objetivo.id}"
+                self.assertEqual(self.client.get("/api/usuarios").status_code, 403)
+                self.assertEqual(self.client.get(ruta).status_code, 403)
+                self.assertEqual(
+                    self.client.post(
+                        "/api/usuarios",
+                        {"username": "nueva", "password": "Clave-segura-2026", "rol": "operario"},
+                    ).status_code,
+                    403,
+                )
+                self.assertEqual(
+                    self.client.patch(ruta, {"rol": "administrador"}, format="json").status_code,
+                    403,
+                )
+                self.assertEqual(
+                    self.client.post(f"{ruta}/desactivar").status_code, 403
+                )
+                self.client.logout()
+
+        self.objetivo.refresh_from_db()
+        self.assertEqual(self.objetivo.rol, User.Rol.OPERARIO)
+        self.assertTrue(self.objetivo.is_active)
+        self.assertFalse(User.objects.filter(username="nueva").exists())
+
+    def test_recepcionista_y_operario_no_ven_historial_ni_trazabilidad(self):
+        for rol in (User.Rol.RECEPCIONISTA, User.Rol.OPERARIO):
+            with self.subTest(rol=rol):
+                self.iniciar_como(rol)
+                self.assertEqual(
+                    self.client.get(f"/api/usuarios/{self.objetivo.id}/historial").status_code, 403
+                )
+                self.assertEqual(
+                    self.client.get("/api/usuarios/trazabilidad").status_code, 403
+                )
+                self.client.logout()
+
+    def test_administrador_si_accede_a_la_gestion_de_usuarios(self):
+        User.objects.create_user(username="admin", password="x", rol=User.Rol.ADMINISTRADOR)
+        self.client.login(username="admin", password="x")
+        self.assertEqual(self.client.get("/api/usuarios").status_code, 200)
+        self.assertEqual(self.client.get(f"/api/usuarios/{self.objetivo.id}").status_code, 200)
+        self.assertEqual(
+            self.client.get(f"/api/usuarios/{self.objetivo.id}/historial").status_code, 200
+        )
+        self.assertEqual(self.client.get("/api/usuarios/trazabilidad").status_code, 200)
+
+
 class AuditoriaTests(APITestCase):
     def setUp(self):
         self.admin = User.objects.create_user(
