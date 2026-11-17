@@ -12,6 +12,5 @@ export function leerFiltrosCalificaciones(params: Lector) {
     estrellas: elegido(params.get("estrellas"), ["1", "2", "3", "4", "5"]),
     desde: fecha(params.get("desde")),
     hasta: fecha(params.get("hasta")),
-    //*
   };
 }
