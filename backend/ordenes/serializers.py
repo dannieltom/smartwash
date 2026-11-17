@@ -12,6 +12,7 @@ from accounts.models import User
 from catalogo.models import Material, Servicio, Tarifa, TipoPrenda
 from catalogo.precios import calcular_precio
 from clientes.models import Cliente
+from fidelizacion.models import descuento_por_puntos
 from turnos.services import turno_vigente
 
 from .estimacion import calcular_fecha_estimada, transiciones
@@ -295,6 +296,7 @@ class OrdenSerializer(serializers.ModelSerializer):
             tiene_abono=orden.tiene_abono(),
             pago_completo=pagado >= orden.valor_total,
             saldo_a_favor=f"{orden.saldo_a_favor():.2f}",
+            pesos_por_punto=str(descuento_por_puntos(1)),
             calificacion=calificacion_publica(orden),
         )
         return datos

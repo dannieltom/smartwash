@@ -22,6 +22,7 @@ const ETIQUETAS: Record<string, string> = {
   decision: "Decision",
   gravedades: "Gravedad",
   motivo: "Motivo",
+  puntos: "Puntos",
 };
 
 const SIN_ETIQUETA = new Set(["non_field_errors", "detail"]);
