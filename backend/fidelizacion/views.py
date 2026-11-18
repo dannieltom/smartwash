@@ -1,16 +1,23 @@
 from django.shortcuts import get_object_or_404
 from django.utils import timezone
+from django.utils.decorators import method_decorator
+from django.views.decorators.csrf import csrf_protect
 from rest_framework import generics
 from rest_framework import status
-from rest_framework.exceptions import ValidationError
+from rest_framework.exceptions import NotFound, ValidationError
+from rest_framework.permissions import AllowAny
 from rest_framework.response import Response
+from rest_framework.throttling import ScopedRateThrottle
 from rest_framework.views import APIView
 
 from clientes.models import Cliente
 from core.permissions import AdministradorORecepcionista, SoloAdministrador
+from ordenes.serializers import pesos
+from ordenes.views import ConsultaPorDocumentoThrottle, cliente_del_portal
 
-from .models import Promocion, ReglaDescuento, ReglaInactividad
+from .models import Promocion, ReglaDescuento, ReglaInactividad, descuento_por_puntos
 from .serializers import (
+    BeneficioPublicoSerializer,
     ClienteInactivoSerializer,
     PromocionSerializer,
     ReglaDescuentoSerializer,
@@ -26,6 +33,10 @@ from .services import (
 
 MENSAJE_SIN_REGLAS = "Configura al menos una regla de inactividad activa."
 MENSAJE_PROCESO_FALLIDO = "No se pudo completar el proceso. No se aplico ningun cambio."
+MENSAJE_SIN_INFORMACION = (
+    "No hay información disponible con esos datos. Revisa tu cédula y el correo que registraste."
+)
+MENSAJE_SIN_BENEFICIOS = "Aún no tienes puntos ni beneficios disponibles para canjear."
 
 
 class ReglaDescuentoListCreateView(generics.ListCreateAPIView):
@@ -69,6 +80,32 @@ class PromocionesDisponiblesView(APIView):
         )
         return Response(
             PromocionSerializer(promociones, many=True, context={"request": request}).data
+        )
+
+
+@method_decorator(csrf_protect, name="dispatch")
+class MisPuntosView(APIView):
+    """Publica, con el mismo acceso y limite de intentos que la consulta de pedidos del portal."""
+
+    permission_classes = [AllowAny]
+    throttle_classes = [ScopedRateThrottle, ConsultaPorDocumentoThrottle]
+    throttle_scope = "consulta-documento"
+
+    def post(self, request):
+        cliente = cliente_del_portal(request.data)
+        if cliente is None:
+            raise NotFound(MENSAJE_SIN_INFORMACION)
+        beneficios = Promocion.objects.disponibles(cliente, timezone.localdate()).order_by(
+            "vigente_hasta", "nombre"
+        )
+        datos = BeneficioPublicoSerializer(beneficios, many=True).data
+        return Response(
+            {
+                "puntos": cliente.puntos,
+                "valor_puntos": pesos(descuento_por_puntos(cliente.puntos)),
+                "beneficios": datos,
+                "mensaje": None if cliente.puntos or datos else MENSAJE_SIN_BENEFICIOS,
+            }
         )
 
 

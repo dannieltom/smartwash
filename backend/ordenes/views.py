@@ -221,6 +221,19 @@ class ConsultaPorDocumentoThrottle(SimpleRateThrottle):
         return self.cache_format % {"scope": self.scope, "ident": documento}
 
 
+def cliente_del_portal(datos):
+    """El cliente cuya cedula y correo coinciden; None si no, sin distinguir cual fallo."""
+    entrada = ConsultaPorDocumentoSerializer(data=datos)
+    entrada.is_valid(raise_exception=True)
+    cliente = Cliente.objects.filter(
+        documento__iexact=normalizar_documento(entrada.validated_data["documento"])
+    ).first()
+    correo = entrada.validated_data["correo"].strip().lower()
+    if cliente is None or not cliente.correo.strip() or cliente.correo.strip().lower() != correo:
+        return None
+    return cliente
+
+
 def resumen_publico(orden):
     calificacion = calificacion_de(orden)
     return {
@@ -245,13 +258,8 @@ class ConsultaPorDocumentoView(APIView):
     throttle_scope = "consulta-documento"
 
     def post(self, request):
-        datos = ConsultaPorDocumentoSerializer(data=request.data)
-        datos.is_valid(raise_exception=True)
-        cliente = Cliente.objects.filter(
-            documento__iexact=normalizar_documento(datos.validated_data["documento"])
-        ).first()
-        correo = datos.validated_data["correo"].strip().lower()
-        if cliente is None or not cliente.correo.strip() or cliente.correo.strip().lower() != correo:
+        cliente = cliente_del_portal(request.data)
+        if cliente is None:
             raise NotFound(MENSAJE_SIN_PEDIDOS)
 
         ordenes = (

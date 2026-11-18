@@ -165,3 +165,12 @@ class ClienteInactivoSerializer(serializers.Serializer):
     puntos = serializers.IntegerField(source="cliente.puntos")
     ultima_actividad = serializers.DateField()
     dias_inactivo = serializers.IntegerField()
+
+
+class BeneficioPublicoSerializer(serializers.ModelSerializer):
+    """Publica: sin id, segmentos ni datos internos de la promocion."""
+
+    class Meta:
+        model = Promocion
+        fields = ("nombre", "descripcion", "tipo", "valor", "vigente_hasta")
+        read_only_fields = fields
