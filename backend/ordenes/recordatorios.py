@@ -7,6 +7,8 @@ from django.db import DatabaseError, transaction
 from django.db.models import Count, Max, Q
 from django.utils import timezone
 
+from notificaciones.models import Comunicacion
+
 from .avisos import pesos
 from .historial import registrar_evento
 from .models import HistorialOrden, Orden
@@ -99,6 +101,14 @@ def enviar_recordatorios(ahora=None):
                     None,
                     f"{INICIO_DETALLE} enviado a {correo} "
                     f"({orden.recordatorios + 1} de {MAX_RECORDATORIOS}).",
+                )
+                Comunicacion.objects.create(
+                    cliente=orden.cliente,
+                    tipo=Comunicacion.Tipo.RECORDATORIO,
+                    orden=orden,
+                    correo=correo,
+                    asunto=asunto,
+                    cuerpo=cuerpo,
                 )
         except DatabaseError:
             logger.exception("No se registro el recordatorio de la orden %s", orden.codigo)

@@ -3992,6 +3992,16 @@ class AcumularPuntosTests(CatalogoDePruebaMixin, APITestCase):
         self.assertFalse(self.orden.historial.filter(tipo_evento=Evento.ENTREGA).exists())
 
 
+def otras_apps(executor):
+    # notificaciones depende de la ultima migracion de ordenes: su estado arrastraria
+    # el modelo actual de Orden sobre una tabla ya revertida.
+    return [
+        nodo
+        for nodo in executor.loader.graph.leaf_nodes()
+        if nodo[0] not in ("ordenes", "notificaciones")
+    ]
+
+
 class MigracionValorUnitarioDeclaradoTests(TransactionTestCase):
     antes = [("ordenes", "0013_dano_cantidad_afectada")]
     despues = [("ordenes", "0014_dano_valor_unitario_declarado")]
@@ -4000,7 +4010,7 @@ class MigracionValorUnitarioDeclaradoTests(TransactionTestCase):
         executor = MigrationExecutor(connection)
         executor.migrate(self.antes)
         # Todo con los modelos de ese momento: la tabla de ordenes tambien era distinta.
-        otras = [nodo for nodo in executor.loader.graph.leaf_nodes() if nodo[0] != "ordenes"]
+        otras = otras_apps(executor)
         apps = executor.loader.project_state(otras + self.antes).apps
         recepcion = apps.get_model("accounts", "User").objects.create(username="r", rol="recepcionista")
         cliente = apps.get_model("clientes", "Cliente").objects.create(
@@ -4047,7 +4057,7 @@ class MigracionTipoDeQuejaTests(TransactionTestCase):
     def test_las_quejas_anteriores_quedan_como_queja(self):
         executor = MigrationExecutor(connection)
         executor.migrate(self.antes)
-        otras = [nodo for nodo in executor.loader.graph.leaf_nodes() if nodo[0] != "ordenes"]
+        otras = otras_apps(executor)
         apps = executor.loader.project_state(otras + self.antes).apps
         recepcion = apps.get_model("accounts", "User").objects.create(username="r", rol="recepcionista")
         cliente = apps.get_model("clientes", "Cliente").objects.create(
