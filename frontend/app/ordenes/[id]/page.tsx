@@ -33,6 +33,7 @@ import AsignarOperario from "./asignar-operario";
 import AvisoCliente from "./aviso-cliente";
 import CambiarEstado from "./cambiar-estado";
 import CancelarOrden from "./cancelar-orden";
+import CanjearPuntos from "./canjear-puntos";
 import DecisionEntrega from "./decision-entrega";
 import DecisionProceso from "./decision-proceso";
 import NovedadesOrden from "./novedades-orden";
@@ -160,6 +161,7 @@ export default async function OrdenPage({
       <RegistrarNovedad orden={orden} usuario={user} />
       {novedades && <NovedadesOrden novedades={novedades} />}
       {puedeEditar && <AsignarOperario orden={orden} operarios={operarios} usuario={user} />}
+      {puedeEditar && cliente && <CanjearPuntos orden={orden} saldo={cliente.puntos} />}
       {puedeEditar && <CancelarOrden orden={orden} novedades={novedades} />}
 
       <ClayCard className="mb-6">
@@ -168,6 +170,9 @@ export default async function OrdenPage({
           <Dato etiqueta="Descuento fidelizacion">
             {Number(orden.descuento) > 0 ? `− ${formatCOP(orden.descuento)}` : formatCOP(0)}
           </Dato>
+          {Number(orden.descuento_puntos) > 0 && (
+            <Dato etiqueta={`Descuento por ${orden.puntos_canjeados} puntos`}>− {formatCOP(orden.descuento_puntos)}</Dato>
+          )}
           {Number(orden.descuento_novedad) > 0 && (
             <Dato etiqueta="Descuento por novedad">− {formatCOP(orden.descuento_novedad)}</Dato>
           )}
