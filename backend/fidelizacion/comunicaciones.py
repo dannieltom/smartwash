@@ -1,10 +1,11 @@
 import logging
 
 from django.core.mail import send_mail
-from django.db import DatabaseError
+from django.db import DatabaseError, transaction
 from django.utils import timezone
 
 from clientes.models import Cliente
+from notificaciones.models import Comunicacion
 from ordenes.avisos import pesos
 from ordenes.recordatorios import enviar_recordatorios
 
@@ -58,9 +59,18 @@ def enviar_promociones(hoy=None):
                 continue
             resultado["enviados"] += 1
             try:
-                ComunicacionPromocional.objects.get_or_create(
-                    cliente=cliente, promocion=promocion, defaults={"correo": cliente.correo}
-                )
+                with transaction.atomic():
+                    ComunicacionPromocional.objects.get_or_create(
+                        cliente=cliente, promocion=promocion, defaults={"correo": cliente.correo}
+                    )
+                    Comunicacion.objects.create(
+                        cliente=cliente,
+                        tipo=Comunicacion.Tipo.PROMOCION,
+                        promocion=promocion,
+                        correo=cliente.correo,
+                        asunto=asunto,
+                        cuerpo=cuerpo,
+                    )
             except DatabaseError:
                 logger.exception(
                     "No se registro la promocion %s enviada al cliente %s", promocion.pk, cliente.pk
