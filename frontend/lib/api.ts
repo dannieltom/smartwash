@@ -435,6 +435,35 @@ export async function actualizarReglaDescuento(
   return api(`/fidelizacion/reglas-descuento/${id}`, { method: "PATCH", body: datos });
 }
 
+/* ------------------------- Fidelizacion: promociones por segmento (HU28) ------------------------- */
+
+/** El segmento de una promocion es la clasificacion del cliente: no hay un endpoint de segmentos. */
+export const SEGMENTOS_PROMOCION: Cliente["clasificacion"][] = ["Ocasional", "Frecuente", "VIP"];
+
+export type Promocion = {
+  id: number;
+  nombre: string;
+  descripcion: string;
+  tipo: ReglaDescuento["tipo"];
+  valor: string;
+  segmentos: Cliente["clasificacion"][];
+  activa: boolean;
+  vigente_desde: string;
+  vigente_hasta: string;
+  /** Activa y con hoy dentro de la vigencia, segun el backend. */
+  disponible: boolean;
+};
+
+export type PromocionFormulario = Omit<Promocion, "id" | "disponible">;
+
+export async function getPromociones(cookieStore: CookieStore): Promise<Promocion[] | null> {
+  return fetchBackend<Promocion[]>("/fidelizacion/promociones", cookieStore);
+}
+
+export async function crearPromocion(datos: PromocionFormulario): Promise<Response> {
+  return api("/fidelizacion/promociones", { method: "POST", body: datos });
+}
+
 export type ResumenEnvio = { enviados: number; sin_correo: number; fallidos: number };
 
 /** El backend registra cada correo que sale (HU33) dentro de esta misma peticion;

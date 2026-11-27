@@ -1,4 +1,5 @@
 import { cookies } from "next/headers";
+import Link from "next/link";
 import { redirect } from "next/navigation";
 
 import { getCurrentUser, getReglasDescuento } from "@/lib/api";
@@ -18,7 +19,10 @@ export default async function FidelizacionPage() {
   return (
     <main className="mx-auto max-w-5xl px-4 py-8 sm:px-8 sm:py-12">
       <Encabezado eyebrow="Administracion · EP08" titulo="Fidelizacion">
-        Configura reglas de descuento para tus clientes (HU08).
+        Configura reglas de descuento para tus clientes (HU08).{" "}
+        <Link href="/fidelizacion/promociones" className="font-bold underline">
+          Ver promociones
+        </Link>
       </Encabezado>
 
       <ClayCard className="mb-6">
