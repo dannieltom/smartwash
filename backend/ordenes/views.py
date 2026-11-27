@@ -39,7 +39,7 @@ from core.permissions import (
     SoloAdministradorEscribe,
     SoloOperario,
 )
-from fidelizacion.models import puntos_por_consumo
+from fidelizacion.models import descuento_por_puntos, puntos_por_consumo
 from pagos.models import Pago
 from turnos.services import esta_en_turno
 
@@ -61,11 +61,13 @@ from .models import (
     clasificacion_por_consumo,
 )
 from .serializers import (
+    ESTADOS_QUE_ADMITEN_LINEAS,
     ComprobanteSerializer,
     AgregarServicioSerializer,
     AsignacionSerializer,
     CambioEstadoSerializer,
     CancelacionSerializer,
+    CanjePuntosSerializer,
     ConsultaPorDocumentoSerializer,
     ConsultaPublicaSerializer,
     ConfiguracionDescuentoNovedadSerializer,
@@ -219,6 +221,19 @@ class ConsultaPorDocumentoThrottle(SimpleRateThrottle):
         return self.cache_format % {"scope": self.scope, "ident": documento}
 
 
+def cliente_del_portal(datos):
+    """El cliente cuya cedula y correo coinciden; None si no, sin distinguir cual fallo."""
+    entrada = ConsultaPorDocumentoSerializer(data=datos)
+    entrada.is_valid(raise_exception=True)
+    cliente = Cliente.objects.filter(
+        documento__iexact=normalizar_documento(entrada.validated_data["documento"])
+    ).first()
+    correo = entrada.validated_data["correo"].strip().lower()
+    if cliente is None or not cliente.correo.strip() or cliente.correo.strip().lower() != correo:
+        return None
+    return cliente
+
+
 def resumen_publico(orden):
     calificacion = calificacion_de(orden)
     return {
@@ -243,13 +258,8 @@ class ConsultaPorDocumentoView(APIView):
     throttle_scope = "consulta-documento"
 
     def post(self, request):
-        datos = ConsultaPorDocumentoSerializer(data=request.data)
-        datos.is_valid(raise_exception=True)
-        cliente = Cliente.objects.filter(
-            documento__iexact=normalizar_documento(datos.validated_data["documento"])
-        ).first()
-        correo = datos.validated_data["correo"].strip().lower()
-        if cliente is None or not cliente.correo.strip() or cliente.correo.strip().lower() != correo:
+        cliente = cliente_del_portal(request.data)
+        if cliente is None:
             raise NotFound(MENSAJE_SIN_PEDIDOS)
 
         ordenes = (
@@ -468,6 +478,22 @@ class CambiarEstadoView(APIView):
         return Response(OrdenSerializer(ordenes_con_detalle().get(pk=orden.pk)).data)
 
 
+def devolver_puntos_canjeados(orden, usuario):
+    """Devuelve al cliente los puntos canjeados en una orden cancelada.
+
+    Va dentro de la transaccion de la cancelacion. Devuelve la nota para el historial
+    (vacia si la orden no tenia canje).
+    """
+    puntos = orden.puntos_canjeados
+    if puntos == 0:
+        return ""
+    cliente = Cliente.objects.select_for_update().get(pk=orden.cliente_id)
+    cliente.puntos += puntos
+    cliente.registrar_autoria(usuario)
+    cliente.save(update_fields=["puntos", "actualizado_por", "actualizado_en"])
+    return f". Puntos devueltos al cliente: {puntos} (saldo {cliente.puntos})"
+
+
 class CancelarOrdenView(APIView):
     permission_classes = [AdministradorORecepcionista]
 
@@ -485,6 +511,7 @@ class CancelarOrdenView(APIView):
             detalle = f"{anterior} → {orden.estado}. Motivo: {motivo}"
             if operario is not None:
                 detalle += f". Sale de la bandeja de {nombre_usuario(operario)}"
+            detalle += devolver_puntos_canjeados(orden, request.user)
             registrar_evento(orden, Evento.CANCELACION, request.user, detalle)
             # Los pagos no se tocan: la devolucion queda solo en el historial.
             pagado = orden.total_pagado()
@@ -495,6 +522,52 @@ class CancelarOrdenView(APIView):
                     request.user,
                     f"${pagado} devueltos al cliente. Motivo: {motivo}",
                 )
+        return Response(OrdenSerializer(ordenes_con_detalle().get(pk=orden.pk)).data)
+
+
+class CanjearPuntosView(APIView):
+    permission_classes = [AdministradorORecepcionista]
+
+    def post(self, request, pk):
+        entrada = CanjePuntosSerializer(data=request.data)
+        entrada.is_valid(raise_exception=True)
+        puntos = entrada.validated_data["puntos"]
+        with operacion_sobre_orden():
+            orden = get_object_or_404(Orden.objects.select_for_update(), pk=pk)
+            if orden.estado not in ESTADOS_QUE_ADMITEN_LINEAS:
+                raise serializers.ValidationError(
+                    {
+                        "estado": f'La orden esta "{orden.estado}": los puntos solo se canjean '
+                        'antes de "En proceso".'
+                    }
+                )
+            # Bloqueado: dos canjes simultaneos no pueden gastar el mismo saldo.
+            cliente = Cliente.objects.select_for_update().get(pk=orden.cliente_id)
+            if puntos > cliente.puntos:
+                raise serializers.ValidationError(
+                    {"puntos": f"El cliente solo tiene {cliente.puntos} puntos."}
+                )
+            monto = descuento_por_puntos(puntos)
+            if monto > orden.valor_total:
+                raise serializers.ValidationError(
+                    {
+                        "puntos": f"El descuento (${monto}) supera el total de la orden "
+                        f"(${orden.valor_total})."
+                    }
+                )
+            cliente.puntos -= puntos
+            cliente.registrar_autoria(request.user)
+            cliente.save(update_fields=["puntos", "actualizado_por", "actualizado_en"])
+            orden.descuento_puntos += monto
+            orden.puntos_canjeados += puntos
+            guardar_recalculo(orden, request.user)
+            registrar_evento(
+                orden,
+                Evento.CANJE_PUNTOS,
+                request.user,
+                f"{puntos} puntos canjeados por ${monto}. Saldo del cliente: {cliente.puntos}. "
+                f"Nuevo total ${orden.valor_total}",
+            )
         return Response(OrdenSerializer(ordenes_con_detalle().get(pk=orden.pk)).data)
 
 

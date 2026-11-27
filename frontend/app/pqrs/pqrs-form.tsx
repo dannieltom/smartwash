@@ -41,7 +41,16 @@ export default function PqrsForm({ tipoInicial, codigoInicial }: { tipoInicial: 
   const [errores, setErrores] = useState<ErroresApi>({});
   const [general, setGeneral] = useState<string[]>([]);
   const [pending, setPending] = useState(false);
+  const [version, setVersion] = useState(0);
   const codigoObligatorio = tipo !== "sugerencia";
+
+  // Cancelar: descarta lo escrito y vuelve al estado inicial (lo precargado por la URL), sin llamar al backend.
+  function cancelar() {
+    setTipo(tipoInicial);
+    setErrores({});
+    setGeneral([]);
+    setVersion((v) => v + 1);
+  }
 
   async function onSubmit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -83,7 +92,8 @@ export default function PqrsForm({ tipoInicial, codigoInicial }: { tipoInicial: 
   if (enviado) {
     return (
       <p role="status" className="text-sm text-(--sw-ink)">
-        Recibimos tu solicitud. Te respondemos por el correo o telefono que nos dejaste.
+        Tu solicitud quedó registrada y está pendiente de gestión manual por la Recepcionista. Te respondemos por el
+        correo o teléfono que nos dejaste.
       </p>
     );
   }
@@ -91,7 +101,7 @@ export default function PqrsForm({ tipoInicial, codigoInicial }: { tipoInicial: 
   const describe = (campo: Campo) => (errores[campo]?.length ? `error-${campo}` : undefined);
 
   return (
-    <form onSubmit={onSubmit} className="grid grid-cols-1 gap-4 sm:grid-cols-2">
+    <form key={version} onSubmit={onSubmit} className="grid grid-cols-1 gap-4 sm:grid-cols-2">
       <ClayField label="Tipo de solicitud">
         <ConError campo="tipo" errores={errores}>
           <ClaySelect
@@ -158,9 +168,12 @@ export default function PqrsForm({ tipoInicial, codigoInicial }: { tipoInicial: 
         </div>
       )}
 
-      <div className="sm:col-span-2">
+      <div className="flex gap-3 sm:col-span-2">
         <ClayButton type="submit" disabled={pending}>
           {pending ? "Enviando..." : "Enviar solicitud"}
+        </ClayButton>
+        <ClayButton type="button" variant="secundario" onClick={cancelar} disabled={pending}>
+          Cancelar
         </ClayButton>
       </div>
     </form>

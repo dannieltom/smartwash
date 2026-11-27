@@ -4,6 +4,7 @@ import { redirect } from "next/navigation";
 
 import { getCurrentUser, getReglasDescuento } from "@/lib/api";
 import { ClayCard, Encabezado } from "../components/ui/clay";
+import EnviarComunicaciones from "./enviar-comunicaciones";
 import ReglaDescuentoForm from "./regla-form";
 import TablaReglas from "./tabla-reglas";
 
@@ -23,6 +24,11 @@ export default async function FidelizacionPage() {
           Ver promociones
         </Link>
       </Encabezado>
+
+      <ClayCard className="mb-6">
+        <h2 className="sw-eyebrow">Comunicaciones a clientes</h2>
+        <EnviarComunicaciones className="mt-4" />
+      </ClayCard>
 
       <ClayCard className="mb-6">
         <h2 className="sw-eyebrow">Nueva regla de descuento</h2>

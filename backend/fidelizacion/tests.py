@@ -1,7 +1,12 @@
-from datetime import date, timedelta
+from datetime import date, datetime, time, timedelta
+from io import StringIO
+from unittest import mock
 from decimal import Decimal
 
 from django.contrib.auth import get_user_model
+from django.core import mail
+from django.core.cache import cache
+from django.core.management import CommandError, call_command
 from django.db import IntegrityError
 from django.test import SimpleTestCase, TestCase, override_settings
 from django.utils import timezone
@@ -9,7 +14,19 @@ from rest_framework.test import APITestCase
 
 from clientes.models import Cliente
 
-from .models import Promocion, ReglaDescuento, puntos_por_consumo
+from ordenes.models import HistorialOrden, Orden
+from ordenes.recordatorios import enviar_recordatorios
+
+from .models import (
+    BeneficioInactividad,
+    ComunicacionPromocional,
+    Promocion,
+    ReglaDescuento,
+    ReglaInactividad,
+    descuento_por_puntos,
+    puntos_por_consumo,
+)
+from .services import clientes_inactivos
 
 User = get_user_model()
 
@@ -401,6 +418,570 @@ class PromocionDescuentoTests(TestCase):
         )
 
 
+class InactividadBase(APITestCase):
+    def setUp(self):
+        self.hoy = timezone.localdate()
+        self.admin = User.objects.create_user(
+            username="admin", password="x", rol=User.Rol.ADMINISTRADOR
+        )
+        self.recepcion = User.objects.create_user(
+            username="recep", password="x", rol=User.Rol.RECEPCIONISTA
+        )
+        self.contador = 0
+
+    def hace(self, dias):
+        dia = self.hoy - timedelta(days=dias)
+        return timezone.make_aware(datetime.combine(dia, time(12, 0)))
+
+    def cliente(self, registrado_hace=400, ultima_orden_hace=None, estado=Orden.Estado.EN_ESPERA):
+        self.contador += 1
+        cliente = Cliente.objects.create(
+            documento=str(self.contador), nombre_completo=f"Cliente {self.contador}", telefono="300"
+        )
+        Cliente.objects.filter(pk=cliente.pk).update(creado_en=self.hace(registrado_hace))
+        if ultima_orden_hace is not None:
+            orden = Orden.objects.create(
+                codigo=f"OR-{self.contador}", cliente=cliente, recepcionista=self.recepcion, estado=estado
+            )
+            Orden.objects.filter(pk=orden.pk).update(creado_en=self.hace(ultima_orden_hace))
+        return cliente
+
+    def regla(self, dias=30, puntos=50, **extra):
+        return ReglaInactividad.objects.create(
+            nombre=f"Regla {dias}", dias_sin_compra=dias, puntos=puntos, **extra
+        )
+
+    def puntos(self, cliente):
+        cliente.refresh_from_db()
+        return cliente.puntos
+
+
+class ClientesInactivosTests(InactividadBase):
+    def test_detecta_a_quien_lleva_el_periodo_sin_ordenes_y_no_a_quien_compro(self):
+        inactivo = self.cliente(ultima_orden_hace=45)
+        self.cliente(ultima_orden_hace=5)
+
+        resultado = clientes_inactivos(30)
+
+        self.assertEqual([c.pk for c, _, _ in resultado], [inactivo.pk])
+        self.assertEqual(resultado[0][2], 45)
+
+    def test_el_dia_exacto_del_periodo_ya_es_inactivo_y_el_anterior_no(self):
+        justo = self.cliente(ultima_orden_hace=30)
+        self.cliente(ultima_orden_hace=29)
+
+        self.assertEqual([c.pk for c, _, _ in clientes_inactivos(30)], [justo.pk])
+
+    def test_cuenta_la_orden_mas_reciente_y_no_la_primera(self):
+        cliente = self.cliente(ultima_orden_hace=100)
+        orden = Orden.objects.create(codigo="OR-NUEVA", cliente=cliente, recepcionista=self.recepcion)
+        Orden.objects.filter(pk=orden.pk).update(creado_en=self.hace(3))
+
+        self.assertEqual(clientes_inactivos(30), [])
+
+    def test_una_orden_cancelada_no_cuenta_como_actividad(self):
+        cliente = self.cliente(ultima_orden_hace=2, estado=Orden.Estado.CANCELADA)
+
+        self.assertEqual([c.pk for c, _, _ in clientes_inactivos(30)], [cliente.pk])
+
+    def test_quien_nunca_compro_cuenta_desde_que_se_registro(self):
+        antiguo = self.cliente(registrado_hace=60)
+        self.cliente(registrado_hace=3)
+
+        self.assertEqual([c.pk for c, _, _ in clientes_inactivos(30)], [antiguo.pk])
+
+    def test_ordena_del_mas_inactivo_al_menos(self):
+        reciente = self.cliente(ultima_orden_hace=40)
+        antiguo = self.cliente(ultima_orden_hace=90)
+
+        self.assertEqual([c.pk for c, _, _ in clientes_inactivos(30)], [antiguo.pk, reciente.pk])
+
+
+class ReglaInactividadApiTests(InactividadBase):
+    RUTA = "/api/fidelizacion/reglas-inactividad"
+
+    def setUp(self):
+        super().setUp()
+        self.client.login(username="admin", password="x")
+
+    def test_crea_una_regla_con_autoria(self):
+        response = self.client.post(
+            self.RUTA, {"nombre": "Un mes", "dias_sin_compra": 30, "puntos": 100}, format="json"
+        )
+
+        self.assertEqual(response.status_code, 201)
+        regla = ReglaInactividad.objects.get()
+        self.assertTrue(regla.activa)
+        self.assertEqual(regla.creado_por, self.admin)
+
+    def test_rechaza_periodo_o_puntos_menores_a_uno(self):
+        for campo in ("dias_sin_compra", "puntos"):
+            with self.subTest(campo=campo):
+                datos = {"nombre": "x", "dias_sin_compra": 30, "puntos": 10, campo: 0}
+                response = self.client.post(self.RUTA, datos, format="json")
+
+                self.assertEqual(response.status_code, 400)
+                self.assertIn(campo, response.json())
+        self.assertFalse(ReglaInactividad.objects.exists())
+
+    def test_edita_y_desactiva_una_regla(self):
+        regla = self.regla()
+
+        response = self.client.patch(
+            f"{self.RUTA}/{regla.id}", {"puntos": 80, "activa": False}, format="json"
+        )
+
+        self.assertEqual(response.status_code, 200)
+        regla.refresh_from_db()
+        self.assertEqual((regla.puntos, regla.activa), (80, False))
+        self.assertEqual(regla.actualizado_por, self.admin)
+
+    def test_solo_el_administrador_las_gestiona(self):
+        regla = self.regla()
+        self.client.login(username="recep", password="x")
+
+        self.assertEqual(self.client.get(self.RUTA).status_code, 403)
+        self.assertEqual(
+            self.client.post(
+                self.RUTA, {"nombre": "x", "dias_sin_compra": 30, "puntos": 1}, format="json"
+            ).status_code,
+            403,
+        )
+        self.assertEqual(
+            self.client.patch(f"{self.RUTA}/{regla.id}", {"puntos": 1}, format="json").status_code,
+            403,
+        )
+        self.client.logout()
+        self.assertEqual(self.client.get(self.RUTA).status_code, 403)
+
+
+class ListaClientesInactivosApiTests(InactividadBase):
+    RUTA = "/api/fidelizacion/clientes-inactivos"
+
+    def setUp(self):
+        super().setUp()
+        self.client.login(username="admin", password="x")
+
+    def test_sin_reglas_activas_pide_configurar_el_periodo(self):
+        self.regla(activa=False)
+
+        response = self.client.get(self.RUTA)
+
+        self.assertEqual(response.status_code, 409)
+
+    def test_la_lista_usa_el_periodo_mas_corto_de_las_reglas_activas(self):
+        self.regla(dias=30)
+        self.regla(dias=90)
+        self.regla(dias=7, activa=False)
+        inactivo = self.cliente(ultima_orden_hace=45)
+        self.cliente(ultima_orden_hace=10)
+
+        response = self.client.get(self.RUTA)
+
+        self.assertEqual(response.status_code, 200)
+        datos = response.json()
+        self.assertEqual([c["id"] for c in datos], [inactivo.pk])
+        self.assertEqual(datos[0]["dias_inactivo"], 45)
+        self.assertEqual(datos[0]["ultima_actividad"], str(self.hoy - timedelta(days=45)))
+
+    def test_sin_inactivos_responde_lista_vacia(self):
+        self.regla()
+        self.cliente(ultima_orden_hace=1)
+
+        self.assertEqual(self.client.get(self.RUTA).json(), [])
+
+    def test_solo_el_administrador_la_consulta(self):
+        self.regla()
+        self.client.login(username="recep", password="x")
+
+        self.assertEqual(self.client.get(self.RUTA).status_code, 403)
+
+
+class AsignarBeneficiosInactividadTests(InactividadBase):
+    RUTA = "/api/fidelizacion/clientes-inactivos/asignar-beneficios"
+
+    def setUp(self):
+        super().setUp()
+        self.client.login(username="admin", password="x")
+
+    def test_suma_los_puntos_de_la_regla_a_los_inactivos_y_deja_constancia(self):
+        self.regla(dias=30, puntos=50)
+        inactivo = self.cliente(ultima_orden_hace=45)
+        activo = self.cliente(ultima_orden_hace=5)
+
+        response = self.client.post(self.RUTA)
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json(), {"beneficios": 1, "puntos": 50, "clientes": 1})
+        self.assertEqual(self.puntos(inactivo), 50)
+        self.assertEqual(self.puntos(activo), 0)
+        beneficio = BeneficioInactividad.objects.get()
+        self.assertEqual(beneficio.ultima_actividad, self.hoy - timedelta(days=45))
+
+    def test_no_paga_dos_veces_la_misma_regla_en_el_mismo_periodo_de_inactividad(self):
+        self.regla()
+        cliente = self.cliente(ultima_orden_hace=45)
+
+        self.client.post(self.RUTA)
+        segunda = self.client.post(self.RUTA)
+
+        self.assertEqual(segunda.json(), {"beneficios": 0, "puntos": 0, "clientes": 0})
+        self.assertEqual(self.puntos(cliente), 50)
+
+    def test_si_el_cliente_vuelve_y_se_inactiva_de_nuevo_recibe_otra_vez(self):
+        self.regla()
+        cliente = self.cliente(ultima_orden_hace=45)
+        self.client.post(self.RUTA)
+        BeneficioInactividad.objects.update(ultima_actividad=self.hoy - timedelta(days=200))
+
+        self.client.post(self.RUTA)
+
+        self.assertEqual(self.puntos(cliente), 100)
+
+    def test_varias_reglas_se_suman_segun_el_tiempo_de_inactividad(self):
+        self.regla(dias=30, puntos=50)
+        self.regla(dias=90, puntos=200)
+        medio = self.cliente(ultima_orden_hace=45)
+        largo = self.cliente(ultima_orden_hace=120)
+
+        response = self.client.post(self.RUTA)
+
+        self.assertEqual(response.json(), {"beneficios": 3, "puntos": 300, "clientes": 2})
+        self.assertEqual(self.puntos(medio), 50)
+        self.assertEqual(self.puntos(largo), 250)
+
+    def test_una_regla_inactiva_no_otorga_nada(self):
+        self.regla(activa=False)
+        self.regla(dias=90, puntos=10)
+        cliente = self.cliente(ultima_orden_hace=45)
+
+        self.client.post(self.RUTA)
+
+        self.assertEqual(self.puntos(cliente), 0)
+
+    def test_sin_reglas_activas_no_hace_nada_y_lo_informa(self):
+        cliente = self.cliente(ultima_orden_hace=45)
+
+        response = self.client.post(self.RUTA)
+
+        self.assertEqual(response.status_code, 409)
+        self.assertEqual(self.puntos(cliente), 0)
+        self.assertFalse(BeneficioInactividad.objects.exists())
+
+    def test_si_el_proceso_falla_no_aplica_ningun_cambio_y_registra_el_error(self):
+        self.regla()
+        primero = self.cliente(ultima_orden_hace=60)
+        segundo = self.cliente(ultima_orden_hace=45)
+        original = BeneficioInactividad.objects.get_or_create
+        llamadas = []
+
+        def falla_en_el_segundo(*args, **kwargs):
+            llamadas.append(1)
+            if len(llamadas) == 2:
+                raise RuntimeError("conexion perdida")
+            return original(*args, **kwargs)
+
+        with (
+            mock.patch.object(BeneficioInactividad.objects, "get_or_create", falla_en_el_segundo),
+            self.assertLogs("fidelizacion.services", level="ERROR"),
+        ):
+            response = self.client.post(self.RUTA)
+
+        self.assertEqual(response.status_code, 503)
+        self.assertEqual((self.puntos(primero), self.puntos(segundo)), (0, 0))
+        self.assertFalse(BeneficioInactividad.objects.exists())
+
+    def test_solo_el_administrador_lo_ejecuta(self):
+        self.regla()
+        cliente = self.cliente(ultima_orden_hace=45)
+        self.client.login(username="recep", password="x")
+
+        self.assertEqual(self.client.post(self.RUTA).status_code, 403)
+        self.assertEqual(self.puntos(cliente), 0)
+
+    def test_el_comando_hace_lo_mismo_y_falla_sin_reglas(self):
+        with self.assertRaises(CommandError):
+            call_command("asignar_beneficios_inactividad", stdout=StringIO())
+        self.regla()
+        cliente = self.cliente(ultima_orden_hace=45)
+        salida = StringIO()
+
+        call_command("asignar_beneficios_inactividad", stdout=salida)
+
+        self.assertEqual(self.puntos(cliente), 50)
+        self.assertIn("1 beneficios", salida.getvalue())
+
+
+class ComunicacionesBase(InactividadBase):
+    RUTA = "/api/fidelizacion/comunicaciones/enviar"
+
+    def orden_lista(self, hace_dias, correo="ana@example.com", estado=Orden.Estado.LISTA):
+        cliente = self.cliente(registrado_hace=400)
+        Cliente.objects.filter(pk=cliente.pk).update(correo=correo)
+        orden = Orden.objects.create(
+            codigo=f"LISTA-{self.contador}", cliente=cliente, recepcionista=self.recepcion, estado=estado
+        )
+        self.evento(
+            orden, HistorialOrden.TipoEvento.CAMBIO_ESTADO,
+            "Control de calidad → Lista para entrega", hace_dias,
+        )
+        return orden
+
+    def evento(self, orden, tipo, detalle, hace_dias):
+        # El historial es inmutable: la fecha pasada se fija al crearlo.
+        with mock.patch("django.utils.timezone.now", return_value=self.hace(hace_dias)):
+            HistorialOrden.objects.create(orden=orden, tipo_evento=tipo, detalle=detalle)
+
+    def recordatorios(self, orden):
+        return orden.historial.filter(
+            tipo_evento=HistorialOrden.TipoEvento.NOTIFICACION,
+            detalle__startswith="Recordatorio de orden no reclamada",
+        ).count()
+
+
+class RecordatoriosOrdenesTests(ComunicacionesBase):
+    def setUp(self):
+        super().setUp()
+        self.client.login(username="admin", password="x")
+
+    def enviar(self):
+        return self.client.post(self.RUTA)
+
+    def test_recuerda_la_orden_que_lleva_el_periodo_lista_sin_reclamar(self):
+        orden = self.orden_lista(hace_dias=4)
+
+        response = self.enviar()
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["recordatorios"], {"enviados": 1, "sin_correo": 0, "fallidos": 0})
+        self.assertEqual(len(mail.outbox), 1)
+        self.assertEqual(mail.outbox[0].to, ["ana@example.com"])
+        self.assertIn(orden.codigo, mail.outbox[0].subject)
+        self.assertEqual(self.recordatorios(orden), 1)
+
+    def test_no_recuerda_una_orden_reciente_ni_una_que_no_esta_lista(self):
+        self.orden_lista(hace_dias=1)
+        self.orden_lista(hace_dias=10, estado=Orden.Estado.ENTREGADA)
+
+        self.enviar()
+
+        self.assertEqual(mail.outbox, [])
+
+    def test_no_repite_el_recordatorio_antes_de_que_pase_otro_periodo(self):
+        orden = self.orden_lista(hace_dias=4)
+        self.enviar()
+        self.enviar()
+
+        self.assertEqual(len(mail.outbox), 1)
+        self.assertEqual(self.recordatorios(orden), 1)
+
+    def test_repite_pasado_el_periodo_y_se_detiene_en_el_maximo(self):
+        orden = self.orden_lista(hace_dias=40)
+        for dias in (30, 20):
+            self.evento(
+                orden, HistorialOrden.TipoEvento.NOTIFICACION,
+                "Recordatorio de orden no reclamada enviado a ana@example.com.", dias,
+            )
+
+        self.enviar()
+        self.assertEqual(self.recordatorios(orden), 3)
+
+        enviar_recordatorios(ahora=timezone.now() + timedelta(days=10))
+
+        self.assertEqual(self.recordatorios(orden), 3)
+        self.assertEqual(len(mail.outbox), 1)
+
+    def test_cuenta_desde_la_ultima_vez_que_quedo_lista(self):
+        orden = self.orden_lista(hace_dias=30)
+        self.evento(
+            orden, HistorialOrden.TipoEvento.CAMBIO_ESTADO, "Lista para entrega → En proceso", 20
+        )
+        self.evento(
+            orden, HistorialOrden.TipoEvento.CAMBIO_ESTADO,
+            "Control de calidad → Lista para entrega", 1,
+        )
+
+        self.enviar()
+
+        self.assertEqual(mail.outbox, [])
+
+    def test_sin_correo_no_envia_y_lo_informa(self):
+        orden = self.orden_lista(hace_dias=5, correo="")
+
+        resultado = self.enviar().json()["recordatorios"]
+
+        self.assertEqual(resultado, {"enviados": 0, "sin_correo": 1, "fallidos": 0})
+        self.assertEqual(self.recordatorios(orden), 0)
+
+    def test_un_envio_fallido_no_frena_a_los_demas_y_se_reintenta_despues(self):
+        fallida = self.orden_lista(hace_dias=6, correo="falla@example.com")
+        buena = self.orden_lista(hace_dias=5, correo="ok@example.com")
+        original = mail.EmailMessage.send
+
+        def envia(mensaje, *args, **kwargs):
+            if "falla@example.com" in mensaje.to:
+                raise OSError("smtp caido")
+            return original(mensaje, *args, **kwargs)
+
+        with (
+            mock.patch.object(mail.EmailMessage, "send", envia),
+            self.assertLogs("ordenes.recordatorios", level="ERROR"),
+        ):
+            resultado = self.enviar().json()["recordatorios"]
+
+        self.assertEqual(resultado, {"enviados": 1, "sin_correo": 0, "fallidos": 1})
+        self.assertEqual((self.recordatorios(fallida), self.recordatorios(buena)), (0, 1))
+
+        self.enviar()
+        self.assertEqual(self.recordatorios(fallida), 1)
+
+    def test_el_periodo_se_configura(self):
+        self.orden_lista(hace_dias=1)
+
+        with override_settings(DIAS_RECORDATORIO_ORDEN_LISTA=1):
+            self.enviar()
+
+        self.assertEqual(len(mail.outbox), 1)
+
+    def test_si_la_base_falla_registra_el_error_y_no_cambia_nada(self):
+        orden = self.orden_lista(hace_dias=5)
+        from django.db import OperationalError
+
+        with (
+            mock.patch(
+                "fidelizacion.comunicaciones.enviar_recordatorios", side_effect=OperationalError("caida")
+            ),
+            self.assertLogs("fidelizacion.comunicaciones", level="ERROR"),
+        ):
+            response = self.enviar()
+
+        self.assertEqual(response.status_code, 503)
+        self.assertEqual(mail.outbox, [])
+        self.assertEqual(self.recordatorios(orden), 0)
+
+
+class ComunicacionesPromocionalesTests(ComunicacionesBase):
+    def setUp(self):
+        super().setUp()
+        self.client.login(username="admin", password="x")
+
+    def promocion(self, segmentos=("VIP",), activa=True, desde=-1, hasta=10, **extra):
+        datos = {
+            "nombre": "Semana VIP", "tipo": "porcentaje", "valor": 15, "activa": activa,
+            "vigente_desde": self.hoy + timedelta(days=desde),
+            "vigente_hasta": self.hoy + timedelta(days=hasta),
+        }
+        datos.update(extra)
+        promocion = Promocion.objects.create(**datos)
+        for clasificacion in segmentos:
+            promocion.segmentos.create(clasificacion=clasificacion)
+        return promocion
+
+    def cliente_con_correo(self, clasificacion="VIP", correo="vip@example.com"):
+        cliente = self.cliente()
+        Cliente.objects.filter(pk=cliente.pk).update(clasificacion=clasificacion, correo=correo)
+        return cliente
+
+    def enviar(self):
+        return self.client.post(self.RUTA).json()["promociones"]
+
+    def test_envia_la_promocion_vigente_a_los_clientes_de_su_segmento(self):
+        promocion = self.promocion(descripcion="Solo esta semana")
+        vip = self.cliente_con_correo("VIP", "vip@example.com")
+        self.cliente_con_correo("Ocasional", "otro@example.com")
+
+        resultado = self.enviar()
+
+        self.assertEqual(resultado, {"enviados": 1, "sin_correo": 0, "fallidos": 0})
+        self.assertEqual(len(mail.outbox), 1)
+        self.assertEqual(mail.outbox[0].to, ["vip@example.com"])
+        self.assertIn("15% de descuento", mail.outbox[0].body)
+        self.assertIn("Solo esta semana", mail.outbox[0].body)
+        self.assertEqual(ComunicacionPromocional.objects.get().cliente, vip)
+        self.assertEqual(ComunicacionPromocional.objects.get().promocion, promocion)
+
+    def test_un_monto_fijo_se_muestra_en_pesos(self):
+        self.promocion(tipo="monto_fijo", valor=5000)
+        self.cliente_con_correo()
+
+        self.enviar()
+
+        self.assertIn("$5.000 de descuento", mail.outbox[0].body)
+
+    def test_no_envia_promociones_inactivas_vencidas_ni_futuras(self):
+        self.cliente_con_correo()
+        self.promocion(activa=False)
+        self.promocion(desde=-9, hasta=-1)
+        self.promocion(desde=1, hasta=9)
+
+        self.enviar()
+
+        self.assertEqual(mail.outbox, [])
+
+    def test_no_repite_la_misma_promocion_al_mismo_cliente(self):
+        self.promocion()
+        self.cliente_con_correo()
+
+        self.enviar()
+        segunda = self.enviar()
+
+        self.assertEqual(segunda["enviados"], 0)
+        self.assertEqual(len(mail.outbox), 1)
+
+    def test_un_cliente_nuevo_en_el_segmento_recibe_la_promocion_despues(self):
+        self.promocion()
+        self.cliente_con_correo("VIP", "uno@example.com")
+        self.enviar()
+        self.cliente_con_correo("VIP", "dos@example.com")
+
+        self.enviar()
+
+        self.assertEqual(sorted(m.to[0] for m in mail.outbox), ["dos@example.com", "uno@example.com"])
+
+    def test_sin_correo_no_envia_y_lo_informa(self):
+        self.promocion()
+        self.cliente_con_correo("VIP", "")
+
+        self.assertEqual(self.enviar(), {"enviados": 0, "sin_correo": 1, "fallidos": 0})
+        self.assertFalse(ComunicacionPromocional.objects.exists())
+
+    def test_un_envio_fallido_no_queda_registrado_y_se_reintenta(self):
+        self.promocion()
+        cliente = self.cliente_con_correo()
+
+        with (
+            mock.patch.object(mail.EmailMessage, "send", side_effect=OSError("smtp caido")),
+            self.assertLogs("fidelizacion.comunicaciones", level="ERROR"),
+        ):
+            resultado = self.enviar()
+
+        self.assertEqual(resultado, {"enviados": 0, "sin_correo": 0, "fallidos": 1})
+        self.assertFalse(ComunicacionPromocional.objects.exists())
+
+        self.assertEqual(self.enviar()["enviados"], 1)
+        self.assertEqual(ComunicacionPromocional.objects.get().cliente, cliente)
+
+    def test_solo_el_administrador_dispara_el_envio(self):
+        self.promocion()
+        self.cliente_con_correo()
+        self.client.login(username="recep", password="x")
+
+        self.assertEqual(self.client.post(self.RUTA).status_code, 403)
+        self.assertEqual(mail.outbox, [])
+
+    def test_el_comando_envia_ambas_comunicaciones(self):
+        self.promocion()
+        self.cliente_con_correo()
+        self.orden_lista(hace_dias=5)
+        salida = StringIO()
+
+        call_command("enviar_comunicaciones", stdout=salida)
+
+        self.assertEqual(len(mail.outbox), 2)
+        self.assertIn("recordatorios: 1 enviados", salida.getvalue())
+        self.assertIn("promociones: 1 enviados", salida.getvalue())
+
+
 class PuntosPorConsumoTests(SimpleTestCase):
     def test_un_punto_por_cada_mil_pesos_sin_contar_la_fraccion(self):
         for valor, puntos in (("16000", 16), ("15900.50", 15), ("999", 0), ("0", 0)):
@@ -410,3 +991,137 @@ class PuntosPorConsumoTests(SimpleTestCase):
     @override_settings(PUNTOS_CADA_PESOS=Decimal("500"))
     def test_la_equivalencia_se_configura(self):
         self.assertEqual(puntos_por_consumo(Decimal("16000")), 32)
+
+
+class DescuentoPorPuntosTests(SimpleTestCase):
+    def test_cada_punto_vale_diez_pesos(self):
+        self.assertEqual(descuento_por_puntos(300), Decimal("3000"))
+
+    @override_settings(PESOS_POR_PUNTO=Decimal("25"))
+    def test_el_valor_del_punto_se_configura(self):
+        self.assertEqual(descuento_por_puntos(4), Decimal("100"))
+
+
+class MisPuntosApiTests(APITestCase):
+    URL = "/api/fidelizacion/mis-puntos"
+    SIN_INFORMACION = (
+        "No hay información disponible con esos datos. Revisa tu cédula y el correo que registraste."
+    )
+
+    def setUp(self):
+        cache.clear()
+        self.hoy = timezone.localdate()
+        self.cliente = Cliente.objects.create(
+            documento="1090123456",
+            nombre_completo="Ana Gomez",
+            telefono="3001112233",
+            correo="ana@example.com",
+            clasificacion="VIP",
+            puntos=300,
+        )
+
+    def promocion(self, segmentos=("VIP",), activa=True, desde=-1, hasta=10, **extra):
+        datos = {
+            "nombre": "Promo", "descripcion": "Solo este mes", "tipo": "porcentaje", "valor": 10,
+            "activa": activa,
+            "vigente_desde": self.hoy + timedelta(days=desde),
+            "vigente_hasta": self.hoy + timedelta(days=hasta),
+        }
+        datos.update(extra)
+        promocion = Promocion.objects.create(**datos)
+        for clasificacion in segmentos:
+            promocion.segmentos.create(clasificacion=clasificacion)
+        return promocion
+
+    def consultar(self, documento="1090123456", correo="ana@example.com"):
+        return self.client.post(self.URL, {"documento": documento, "correo": correo}, format="json")
+
+    def test_muestra_los_puntos_su_valor_y_los_beneficios_disponibles_para_el_cliente(self):
+        self.promocion(nombre="Fijo VIP", tipo="monto_fijo", valor=5000, hasta=20)
+        self.promocion(nombre="Diez VIP", hasta=5)
+        self.promocion(nombre="Otro segmento", segmentos=("Ocasional",))
+        self.promocion(nombre="Inactiva", activa=False)
+        self.promocion(nombre="Vencida", desde=-10, hasta=-1)
+        self.promocion(nombre="Futura", desde=1, hasta=10)
+
+        response = self.consultar()
+
+        self.assertEqual(response.status_code, 200)
+        datos = response.json()
+        self.assertEqual(datos["puntos"], 300)
+        self.assertEqual(datos["valor_puntos"], 3000)
+        self.assertIsNone(datos["mensaje"])
+        self.assertEqual([b["nombre"] for b in datos["beneficios"]], ["Diez VIP", "Fijo VIP"])
+        self.assertEqual(
+            datos["beneficios"][1],
+            {
+                "nombre": "Fijo VIP",
+                "descripcion": "Solo este mes",
+                "tipo": "monto_fijo",
+                "valor": "5000.00",
+                "vigente_hasta": str(self.hoy + timedelta(days=20)),
+            },
+        )
+
+    def test_solo_expone_datos_no_confidenciales(self):
+        self.promocion()
+
+        datos = self.consultar().json()
+
+        self.assertEqual(set(datos), {"puntos", "valor_puntos", "beneficios", "mensaje"})
+        texto = str(datos)
+        for privado in ("Ana Gomez", "1090123456", "ana@example.com", "3001112233", "VIP"):
+            self.assertNotIn(privado, texto)
+
+    def test_con_puntos_y_sin_promociones_no_muestra_mensaje(self):
+        datos = self.consultar().json()
+
+        self.assertEqual(datos["beneficios"], [])
+        self.assertIsNone(datos["mensaje"])
+
+    def test_sin_puntos_ni_beneficios_informa_que_no_hay_nada_para_canjear(self):
+        Cliente.objects.filter(pk=self.cliente.pk).update(puntos=0)
+
+        response = self.consultar()
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(
+            response.json(),
+            {
+                "puntos": 0,
+                "valor_puntos": 0,
+                "beneficios": [],
+                "mensaje": "Aún no tienes puntos ni beneficios disponibles para canjear.",
+            },
+        )
+
+    def test_datos_que_no_corresponden_a_un_cliente_dan_el_mismo_mensaje_sin_resultados(self):
+        Cliente.objects.create(documento="555", nombre_completo="Sin correo", telefono="300")
+        for documento, correo in (
+            ("999", "ana@example.com"),
+            ("1090123456", "otra@example.com"),
+            ("555", "x@example.com"),
+        ):
+            with self.subTest(documento=documento, correo=correo):
+                response = self.consultar(documento, correo)
+
+                self.assertEqual(response.status_code, 404)
+                self.assertEqual(response.json(), {"detail": self.SIN_INFORMACION})
+
+    def test_tolera_espacios_en_la_cedula_y_mayusculas_en_el_correo(self):
+        response = self.consultar(" 1090 123456 ", " Ana@Example.COM ")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["puntos"], 300)
+
+    def test_exige_cedula_y_correo(self):
+        response = self.client.post(self.URL, {}, format="json")
+
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(set(response.json()), {"documento", "correo"})
+
+    def test_limita_los_intentos_contra_una_misma_cedula(self):
+        for _ in range(10):
+            self.consultar(correo="otra@example.com")
+
+        self.assertEqual(self.consultar().status_code, 429)

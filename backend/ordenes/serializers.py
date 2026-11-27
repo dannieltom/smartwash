@@ -12,6 +12,7 @@ from accounts.models import User
 from catalogo.models import Material, Servicio, Tarifa, TipoPrenda
 from catalogo.precios import calcular_precio
 from clientes.models import Cliente
+from fidelizacion.models import descuento_por_puntos
 from turnos.services import turno_vigente
 
 from .estimacion import calcular_fecha_estimada, transiciones
@@ -269,6 +270,8 @@ class OrdenSerializer(serializers.ModelSerializer):
             "descuento",
             "descuento_novedad",
             "descuento_dano",
+            "descuento_puntos",
+            "puntos_canjeados",
             "valor_total",
             "abono_requerido",
             "fecha_estimada_entrega",
@@ -293,6 +296,7 @@ class OrdenSerializer(serializers.ModelSerializer):
             tiene_abono=orden.tiene_abono(),
             pago_completo=pagado >= orden.valor_total,
             saldo_a_favor=f"{orden.saldo_a_favor():.2f}",
+            pesos_por_punto=str(descuento_por_puntos(1)),
             calificacion=calificacion_publica(orden),
         )
         return datos
@@ -785,6 +789,18 @@ class HistorialNovedadSerializer(NovedadSerializer):
 
     def get_estado(self, novedad) -> str:
         return "pendiente" if novedad.pendiente else "resuelta"
+
+
+class CanjePuntosSerializer(serializers.Serializer):
+    puntos = serializers.IntegerField(
+        min_value=1,
+        error_messages={
+            "required": "Indica cuantos puntos se canjean.",
+            "null": "Indica cuantos puntos se canjean.",
+            "invalid": "Los puntos deben ser un numero entero.",
+            "min_value": "Canjea al menos un punto.",
+        },
+    )
 
 
 class CancelacionSerializer(serializers.Serializer):

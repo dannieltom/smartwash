@@ -464,6 +464,19 @@ export async function crearPromocion(datos: PromocionFormulario): Promise<Respon
   return api("/fidelizacion/promociones", { method: "POST", body: datos });
 }
 
+export type ResumenEnvio = { enviados: number; sin_correo: number; fallidos: number };
+
+/** El backend registra cada correo que sale (HU33) dentro de esta misma peticion;
+ * no hay un endpoint de auditoria aparte que llamar. */
+export type ResultadoComunicaciones = {
+  recordatorios: ResumenEnvio;
+  promociones: ResumenEnvio;
+};
+
+export async function enviarComunicaciones(): Promise<Response> {
+  return api("/fidelizacion/comunicaciones/enviar", { method: "POST" });
+}
+
 /* --------------------------- Recuperacion de contrasena (HU02) --------------------------- */
 
 export async function solicitarRecuperacionPassword(identificador: string): Promise<Response> {
@@ -546,6 +559,10 @@ export type Orden = {
   descuento: string;
   descuento_novedad: string;
   descuento_dano: string;
+  descuento_puntos: string;
+  puntos_canjeados: number;
+  /** Lo que vale un punto al canjearlo; lo define el backend. */
+  pesos_por_punto: string;
   valor_total: string;
   abono_requerido: string;
   fecha_estimada_entrega: string | null;
@@ -965,6 +982,11 @@ export async function getActividad(
  * la devolucion queda en el historial; los pagos no se tocan. */
 export async function cancelarOrden(id: number, motivo: string): Promise<Response> {
   return api(`/ordenes/${id}/cancelacion`, { method: "POST", body: { motivo } });
+}
+
+/** HU27: descuenta puntos del saldo del cliente y los convierte en descuento de la orden. */
+export async function canjearPuntos(id: number, puntos: number): Promise<Response> {
+  return api(`/ordenes/${id}/canje-puntos`, { method: "POST", body: { puntos } });
 }
 
 /** Asigna o reasigna la orden (HU10). El backend valida el rol, el abono, que

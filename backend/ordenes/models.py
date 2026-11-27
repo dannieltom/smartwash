@@ -78,6 +78,10 @@ class Orden(ModeloConAutoria):
     # evaluar con la fecha del dia: mezclarlos borraria estos al recalcular.
     descuento_novedad = models.DecimalField(max_digits=10, decimal_places=2, default=0)
     descuento_dano = models.DecimalField(max_digits=10, decimal_places=2, default=0)
+    descuento_puntos = models.DecimalField(max_digits=10, decimal_places=2, default=0)
+    # Puntos gastados en este descuento: se guardan aparte porque el valor del punto es
+    # configurable y, al cancelar la orden, hay que devolver los mismos puntos que se canjearon.
+    puntos_canjeados = models.PositiveIntegerField(default=0)
     valor_total = models.DecimalField(max_digits=10, decimal_places=2, default=0)
     abono_requerido = models.DecimalField(max_digits=10, decimal_places=2, default=0)
     # Dia en que la orden alcanzo el abono minimo y paso a "Recibida". Se
@@ -266,7 +270,11 @@ class Orden(ModeloConAutoria):
                 self.danos.aggregate(total=Sum("valor_servicio"))["total"] or Decimal("0")
             )
         self.valor_total = max(
-            self.subtotal - self.descuento - self.descuento_novedad - self.descuento_dano,
+            self.subtotal
+            - self.descuento
+            - self.descuento_novedad
+            - self.descuento_dano
+            - self.descuento_puntos,
             Decimal("0"),
         )
 
@@ -427,6 +435,7 @@ class HistorialOrden(models.Model):
         DEVOLUCION = "devolucion", "Devolución"
         DANO_PRENDA = "dano_prenda", "Daño o pérdida de prenda"
         PAGO_DANO = "pago_dano", "Pago al cliente por daño o pérdida"
+        CANJE_PUNTOS = "canje_puntos", "Canje de puntos"
 
     # PROTECT en ambos: borrar la orden o el usuario dejaria el historial
     # incompleto o sin autor.
