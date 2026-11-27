@@ -435,6 +435,19 @@ export async function actualizarReglaDescuento(
   return api(`/fidelizacion/reglas-descuento/${id}`, { method: "PATCH", body: datos });
 }
 
+export type ResumenEnvio = { enviados: number; sin_correo: number; fallidos: number };
+
+/** El backend registra cada correo que sale (HU33) dentro de esta misma peticion;
+ * no hay un endpoint de auditoria aparte que llamar. */
+export type ResultadoComunicaciones = {
+  recordatorios: ResumenEnvio;
+  promociones: ResumenEnvio;
+};
+
+export async function enviarComunicaciones(): Promise<Response> {
+  return api("/fidelizacion/comunicaciones/enviar", { method: "POST" });
+}
+
 /* --------------------------- Recuperacion de contrasena (HU02) --------------------------- */
 
 export async function solicitarRecuperacionPassword(identificador: string): Promise<Response> {
