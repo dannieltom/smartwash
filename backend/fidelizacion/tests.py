@@ -5,6 +5,7 @@ from decimal import Decimal
 
 from django.contrib.auth import get_user_model
 from django.core import mail
+from django.core.cache import cache
 from django.core.management import CommandError, call_command
 from django.db import IntegrityError
 from django.test import SimpleTestCase, TestCase, override_settings
@@ -999,3 +1000,128 @@ class DescuentoPorPuntosTests(SimpleTestCase):
     @override_settings(PESOS_POR_PUNTO=Decimal("25"))
     def test_el_valor_del_punto_se_configura(self):
         self.assertEqual(descuento_por_puntos(4), Decimal("100"))
+
+
+class MisPuntosApiTests(APITestCase):
+    URL = "/api/fidelizacion/mis-puntos"
+    SIN_INFORMACION = (
+        "No hay información disponible con esos datos. Revisa tu cédula y el correo que registraste."
+    )
+
+    def setUp(self):
+        cache.clear()
+        self.hoy = timezone.localdate()
+        self.cliente = Cliente.objects.create(
+            documento="1090123456",
+            nombre_completo="Ana Gomez",
+            telefono="3001112233",
+            correo="ana@example.com",
+            clasificacion="VIP",
+            puntos=300,
+        )
+
+    def promocion(self, segmentos=("VIP",), activa=True, desde=-1, hasta=10, **extra):
+        datos = {
+            "nombre": "Promo", "descripcion": "Solo este mes", "tipo": "porcentaje", "valor": 10,
+            "activa": activa,
+            "vigente_desde": self.hoy + timedelta(days=desde),
+            "vigente_hasta": self.hoy + timedelta(days=hasta),
+        }
+        datos.update(extra)
+        promocion = Promocion.objects.create(**datos)
+        for clasificacion in segmentos:
+            promocion.segmentos.create(clasificacion=clasificacion)
+        return promocion
+
+    def consultar(self, documento="1090123456", correo="ana@example.com"):
+        return self.client.post(self.URL, {"documento": documento, "correo": correo}, format="json")
+
+    def test_muestra_los_puntos_su_valor_y_los_beneficios_disponibles_para_el_cliente(self):
+        self.promocion(nombre="Fijo VIP", tipo="monto_fijo", valor=5000, hasta=20)
+        self.promocion(nombre="Diez VIP", hasta=5)
+        self.promocion(nombre="Otro segmento", segmentos=("Ocasional",))
+        self.promocion(nombre="Inactiva", activa=False)
+        self.promocion(nombre="Vencida", desde=-10, hasta=-1)
+        self.promocion(nombre="Futura", desde=1, hasta=10)
+
+        response = self.consultar()
+
+        self.assertEqual(response.status_code, 200)
+        datos = response.json()
+        self.assertEqual(datos["puntos"], 300)
+        self.assertEqual(datos["valor_puntos"], 3000)
+        self.assertIsNone(datos["mensaje"])
+        self.assertEqual([b["nombre"] for b in datos["beneficios"]], ["Diez VIP", "Fijo VIP"])
+        self.assertEqual(
+            datos["beneficios"][1],
+            {
+                "nombre": "Fijo VIP",
+                "descripcion": "Solo este mes",
+                "tipo": "monto_fijo",
+                "valor": "5000.00",
+                "vigente_hasta": str(self.hoy + timedelta(days=20)),
+            },
+        )
+
+    def test_solo_expone_datos_no_confidenciales(self):
+        self.promocion()
+
+        datos = self.consultar().json()
+
+        self.assertEqual(set(datos), {"puntos", "valor_puntos", "beneficios", "mensaje"})
+        texto = str(datos)
+        for privado in ("Ana Gomez", "1090123456", "ana@example.com", "3001112233", "VIP"):
+            self.assertNotIn(privado, texto)
+
+    def test_con_puntos_y_sin_promociones_no_muestra_mensaje(self):
+        datos = self.consultar().json()
+
+        self.assertEqual(datos["beneficios"], [])
+        self.assertIsNone(datos["mensaje"])
+
+    def test_sin_puntos_ni_beneficios_informa_que_no_hay_nada_para_canjear(self):
+        Cliente.objects.filter(pk=self.cliente.pk).update(puntos=0)
+
+        response = self.consultar()
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(
+            response.json(),
+            {
+                "puntos": 0,
+                "valor_puntos": 0,
+                "beneficios": [],
+                "mensaje": "Aún no tienes puntos ni beneficios disponibles para canjear.",
+            },
+        )
+
+    def test_datos_que_no_corresponden_a_un_cliente_dan_el_mismo_mensaje_sin_resultados(self):
+        Cliente.objects.create(documento="555", nombre_completo="Sin correo", telefono="300")
+        for documento, correo in (
+            ("999", "ana@example.com"),
+            ("1090123456", "otra@example.com"),
+            ("555", "x@example.com"),
+        ):
+            with self.subTest(documento=documento, correo=correo):
+                response = self.consultar(documento, correo)
+
+                self.assertEqual(response.status_code, 404)
+                self.assertEqual(response.json(), {"detail": self.SIN_INFORMACION})
+
+    def test_tolera_espacios_en_la_cedula_y_mayusculas_en_el_correo(self):
+        response = self.consultar(" 1090 123456 ", " Ana@Example.COM ")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["puntos"], 300)
+
+    def test_exige_cedula_y_correo(self):
+        response = self.client.post(self.URL, {}, format="json")
+
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(set(response.json()), {"documento", "correo"})
+
+    def test_limita_los_intentos_contra_una_misma_cedula(self):
+        for _ in range(10):
+            self.consultar(correo="otra@example.com")
+
+        self.assertEqual(self.consultar().status_code, 429)

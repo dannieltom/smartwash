@@ -4,6 +4,7 @@ from .views import (
     AsignarBeneficiosInactividadView,
     ClientesInactivosView,
     EnviarComunicacionesView,
+    MisPuntosView,
     PromocionDetailView,
     PromocionesDisponiblesView,
     PromocionListCreateView,
@@ -27,6 +28,7 @@ urlpatterns = [
         name="promociones-disponibles",
     ),
     path("promociones/<int:pk>", PromocionDetailView.as_view(), name="promocion-detalle"),
+    path("mis-puntos", MisPuntosView.as_view(), name="mis-puntos"),
     path(
         "reglas-inactividad", ReglaInactividadListCreateView.as_view(), name="reglas-inactividad"
     ),
